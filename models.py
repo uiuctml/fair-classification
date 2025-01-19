@@ -139,3 +139,16 @@ class MLPClassifier:
 
   def predict(self, X):
     return self.predict_proba(X).argmax(axis=1)
+
+
+class DummyEstimator(sklearn.base.BaseEstimator):
+
+  def __init__(self, n_classes=2):
+    self.is_fitted_ = True
+    self.classes_ = np.arange(n_classes)
+
+  def fit(self, X, y=None):
+    return self
+
+  def predict_proba(self, X):
+    return X

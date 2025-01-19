@@ -1,6 +1,6 @@
 """Post-processing for fair classification."""
 
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple, List
 from typing_extensions import Self
 
 import numpy as np
@@ -21,6 +21,7 @@ class PostProcessor:
                pred_ay_fn: Optional[Callable] = None,
                criterion: str = 'sp',
                alpha: float = 0.001,
+               class_weight: Optional[List[float]] = None,
                noise: float = 1e-4,
                seed: Optional[int] = None) -> None:
     """
@@ -40,6 +41,7 @@ class PostProcessor:
           `sp` for statistical parity, `eopp` for (binary or multi-class) equal
           opportunity (depending on `n_classes`), and `eo` for equalized odds.
       alpha (float, optional): Fairness tolerance.
+      class_weight (list, optional): Weights for each class, default is uniform.
       noise (float, optional): Factor for the width of uniform random noise used
           to perturb the risk.
       seed (int, optional): Seed for random number generator.
@@ -52,23 +54,22 @@ class PostProcessor:
     self.criterion = criterion
     self.alpha = alpha
     self.noise = noise
+    self.seed = seed
     self.rng = np.random.default_rng(seed)
+
     self.cls_loss_fn = 1 - np.eye(n_classes)
+    if class_weight is not None:
+      self.cls_loss_fn *= np.array(class_weight)[:, None]
 
     if criterion not in ['sp', 'eopp', 'eo']:
       raise ValueError("criterion must be one of `sp`, `eopp`, `eo`")
-    if criterion == 'sp' and (pred_ay_fn is None and
-                              (pred_a_fn is None or pred_y_fn is None)):
-      raise ValueError(
-          '(pred_a_fn and pred_y_fn) or pred_ay_fn must be provided for `sp` criterion'
-      )
-    if criterion in ['eopp', 'eo'] and pred_ay_fn is None:
-      raise ValueError(
-          'pred_ay_fn must be provided for `eopp` or `eo` criterion')
 
   # TODO: sample weight
   def fit(self,
-          x: np.ndarray,
+          x: Optional[np.ndarray] = None,
+          p_a_x: Optional[np.ndarray] = None,
+          p_y_x: Optional[np.ndarray] = None,
+          p_ay_x: Optional[np.ndarray] = None,
           solver: str = cp.GUROBI,
           solve_kwargs: Optional[Dict[str, Any]] = None,
           solve_primal: bool = True) -> Self:
@@ -81,8 +82,10 @@ class PostProcessor:
       solve_kwargs (dict, optional): Keyword arguments for the solver.
       solve_primal (bool, optional): Whether to solve the primal problem.
 
-    If Gurobi is not available, a (slower) alternative is
-    `solver=cp.CBC, solve_kwargs={'integerTolerance': 1e-8}, solve_primal=False`
+    If Gurobi is not available, a (slower) alternative is:
+        solver=cp.CBC,
+        solve_kwargs={'integerTolerance': 1e-8},
+        solve_primal=False,
 
     There are two ways to solve for the parameters of the post-processor, (1)
     solve the primal problem and extract the dual values (solve_primal=True), or
@@ -95,10 +98,10 @@ class PostProcessor:
     solve_kwargs = solve_kwargs or {}
 
     (risk, constraint_gamma, constraint_y, p_a,
-     p_ay) = self.compute_risk_and_constraint_(x)
+     p_ay) = self.compute_risk_and_constraint_(x, p_a_x, p_y_x, p_ay_x)
 
     # Perturb risk to circumvent colinearity
-    self.risk_mean_ = np.mean(risk)
+    self.risk_mean_ = np.mean(np.max(risk, axis=1))
     risk += self.risk_mean_ * self.rng.uniform(
         -self.noise, self.noise, size=risk.shape)
 
@@ -131,7 +134,11 @@ class PostProcessor:
     self.p_ay_ = p_ay
     return self
 
-  def predict_score(self, x: np.ndarray) -> np.ndarray:
+  def predict_score(self,
+                    x: Optional[np.ndarray] = None,
+                    p_a_x: Optional[np.ndarray] = None,
+                    p_y_x: Optional[np.ndarray] = None,
+                    p_ay_x: Optional[np.ndarray] = None) -> np.ndarray:
     """
     Post-process the riskes of the input data by adding the cost of fairness.
 
@@ -142,7 +149,7 @@ class PostProcessor:
       array-like: Post-processed risk values.
     """
     risk, constraint_gamma, constraint_y, _, _ = self.compute_risk_and_constraint_(
-        x, self.p_a_, self.p_ay_)
+        x, p_a_x, p_y_x, p_ay_x, p_a=self.p_a_, p_ay=self.p_ay_)
 
     # Perturb risk to circumvent colinearity
     risk += self.risk_mean_ * self.rng.uniform(
@@ -158,7 +165,11 @@ class PostProcessor:
     fair_risk = risk - fair_cost
     return fair_risk
 
-  def predict(self, x: np.ndarray) -> np.ndarray:
+  def predict(self,
+              x: Optional[np.ndarray] = None,
+              p_a_x: Optional[np.ndarray] = None,
+              p_y_x: Optional[np.ndarray] = None,
+              p_ay_x: Optional[np.ndarray] = None) -> np.ndarray:
     """
     Make fair predictions for the input data.
 
@@ -168,12 +179,15 @@ class PostProcessor:
     Returns:
       array-like: Predicted class labels.
     """
-    fair_risk = self.predict_score(x)
+    fair_risk = self.predict_score(x, p_a_x, p_y_x, p_ay_x)
     return np.argmin(fair_risk, axis=1)
 
   def compute_risk_and_constraint_(
       self,
       x: np.ndarray,
+      p_a_x: Optional[np.ndarray] = None,
+      p_y_x: Optional[np.ndarray] = None,
+      p_ay_x: Optional[np.ndarray] = None,
       p_a: Optional[np.ndarray] = None,
       p_ay: Optional[np.ndarray] = None
   ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -193,17 +207,23 @@ class PostProcessor:
     # risk.shape = (n_examples, n_classes)
     # gamma.shape = (n_examples, n_constraints, n_events)
 
+    if p_a_x is None and self.pred_a_fn is not None:
+      p_a_x = self.pred_a_fn(x)
+    if p_y_x is None and self.pred_y_fn is not None:
+      p_y_x = self.pred_y_fn(x)
+    if p_ay_x is None and self.pred_ay_fn is not None:
+      p_ay_x = self.pred_ay_fn(x).reshape(-1, self.n_groups, self.n_classes)
+
     if self.criterion == 'sp':
 
-      # Get predicted p(A | X) and p(Y | X)
-      if self.pred_ay_fn is not None:
-        p_ay_x = self.pred_ay_fn(x).reshape(-1, self.n_groups, self.n_classes)
-        p_a_x = p_ay_x.sum(axis=2)
-        p_y_x = p_ay_x.sum(axis=1)
-      else:
-        p_a_x = self.pred_a_fn(x)
-        p_y_x = self.pred_y_fn(x)
+      if p_ay_x is None and (p_a_x is None or p_y_x is None):
+        raise ValueError(
+            'p_ay_x or (p_a_x and p_y_x) must be provided for `sp` criterion')
 
+      if p_a_x is None:
+        p_a_x = p_ay_x.sum(axis=2)
+      if p_y_x is None:
+        p_y_x = p_ay_x.sum(axis=1)
       if p_a is None:
         p_a = p_a_x.mean(axis=0)  # shape = (n_groups,)
 
@@ -214,11 +234,11 @@ class PostProcessor:
 
     if self.criterion in ['eopp', 'eo']:
 
-      p_ay_x = self.pred_ay_fn(x).reshape(
-          -1, self.n_groups,
-          self.n_classes)  # shape = (n_examples, n_groups, n_classes)
-      p_y_x = p_ay_x.sum(axis=1)  # shape = (n_examples, n_classes)
+      if p_ay_x is None:
+        raise ValueError('p_ay_x must be provided for `eopp` or `eo` criterion')
 
+      if p_y_x is None:
+        p_y_x = p_ay_x.sum(axis=1)  # do not overwrite p_y_x?
       if p_ay is None:
         p_ay = p_ay_x.mean(axis=0)  # shape = (n_groups, n_classes)
 
