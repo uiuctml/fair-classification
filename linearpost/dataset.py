@@ -159,7 +159,7 @@ class Dataset:
                                    name_1: str,
                                    name_2: str,
                                    normalize: bool = False) -> pd.DataFrame:
-    f1, f2 = self.features.get(name_1), self.features.get(name_2)
+    f1, f2 = self.features[name_1], self.features[name_2]
     assert isinstance(f1, Categorical) and isinstance(f2, Categorical)
     category_names_1 = (f1.category_names if f1.category_names is not None else
                         np.arange(f1.n_categories).astype(str).tolist())

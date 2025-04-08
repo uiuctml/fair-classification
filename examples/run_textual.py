@@ -130,6 +130,9 @@ def main():
   weight_decay = 0.01
   max_grad_norm = 1.0
 
+  # Postprocessor arguments that are not exposed
+  solver = 'GUROBI'
+
   os.makedirs(data_dir_base, exist_ok=True)
   os.makedirs(results_dir, exist_ok=True)
   os.makedirs(cache_dir, exist_ok=True)
@@ -231,13 +234,12 @@ def main():
             n_classes=n_classes,
             n_groups=n_groups,
             fairness_criterion=criterion,
-            remove_unused=True,
             alpha=alpha,
             seed=seed,
         ).fit(p_a_x=D_post.get_split('post')['p_a_x'],
               p_y_x=D_post.get_split('post')['p_y_x'],
               p_ay_x=D_post.get_split('post')['p_ay_x'],
-              solver='GUROBI',
+              solver=solver,
               solve_primal=True)
 
         fair_preds_val = postprocessor.predict(

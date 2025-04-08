@@ -26,13 +26,10 @@ class LinearPost:
     self.seed = seed
     self.rng = np.random.default_rng(seed)
 
-  def perturb_risk(self, risk: np.ndarray) -> np.ndarray:
-    return risk + self.rng.uniform(-self.noise, self.noise, size=risk.shape)
-
   # TODO: sample weight
   def fit(self,
-          risk,
-          probas_group,
+          risk: np.ndarray,
+          probas_group: np.ndarray,
           solver: Optional[str] = None,
           solve_kwargs: Optional[dict[str, Any]] = None,
           solve_primal: bool = True) -> 'LinearPost':
@@ -51,12 +48,25 @@ class LinearPost:
       self.fairness_constraints = [
           (g, list(range(self.n_classes))) for g in range(self.n_groups)
       ]
-    self.n_psi = sum(len(I) for _, I in self.fairness_constraints)
 
     # Perturb risk to circumvent colinearity
     self.risk_mean_ = np.mean(np.max(risk, axis=1))
     self.noise = self.noise * self.risk_mean_
     risk = self.perturb_risk(risk)
+
+    return self.fit_(risk,
+                     probas_group,
+                     solver=solver,
+                     solve_kwargs=solve_kwargs,
+                     solve_primal=solve_primal)
+
+  def fit_(self,
+           risk: np.ndarray,
+           probas_group: np.ndarray,
+           solver: Optional[str] = None,
+           solve_kwargs: Optional[dict[str, Any]] = None,
+           solve_primal: bool = True) -> 'LinearPost':
+    self.n_psi = sum(len(I) for _, I in self.fairness_constraints)
 
     marginal_probas_group = probas_group.mean(axis=0)  # shape = (n_groups,)
     gamma = probas_group / marginal_probas_group[None, ...]
@@ -99,6 +109,9 @@ class LinearPost:
   def predict(self, risk: np.ndarray, probas_group: np.ndarray) -> np.ndarray:
     fair_risk = self.predict_score(risk, probas_group)
     return np.argmin(fair_risk, axis=1)
+
+  def perturb_risk(self, risk: np.ndarray) -> np.ndarray:
+    return risk + self.rng.uniform(-self.noise, self.noise, size=risk.shape)
 
   def linprog_primal_(self, risk: np.ndarray, gamma: np.ndarray,
                       alpha: float) -> cp.Problem:
@@ -200,14 +213,14 @@ class LinearPostSimple:
     elif fairness_criterion == 'fpr' and n_classes == 2:
       # groups passed to LinearPost are joint (A, Y)
       if not remove_unused:
-        fairness_constraints = [(1, 2 * np.arange(n_groups))]
+        fairness_constraints = [(1, n_classes * np.arange(n_groups) + 0)]
       else:
         fairness_constraints = [(1, np.arange(n_groups))]
     else:
       if n_classes == 2 and fairness_criterion == 'tpr':
         # groups passed to LinearPost are joint (A, Y)
         if not remove_unused:
-          fairness_constraints = [(1, 2 * np.arange(n_groups) + 1)]
+          fairness_constraints = [(1, n_classes * np.arange(n_groups) + 1)]
         else:
           fairness_constraints = [(1, np.arange(n_groups))]
       else:
@@ -230,6 +243,8 @@ class LinearPostSimple:
       p_y_x: Optional[np.ndarray] = None,
       p_ay_x: Optional[np.ndarray] = None,
   ):
+    res = {}
+
     if self.fairness_criterion == 'sp':
       if p_ay_x is None and (p_a_x is None or p_y_x is None):
         raise ValueError(
@@ -239,19 +254,24 @@ class LinearPostSimple:
       if p_y_x is None:
         p_y_x = p_ay_x.reshape(-1, self.n_groups, self.n_classes).sum(axis=1)
       p_g_x = p_a_x.reshape(-1, self.n_groups)
+
     if self.fairness_criterion in ['tpr', 'fpr', 'eo']:
       if p_ay_x is None:
         raise ValueError('p_ay_x must be provided for `eopp` or `eo` criterion')
       if p_y_x is None:
         p_y_x = p_ay_x.reshape(-1, self.n_groups, self.n_classes).sum(axis=1)
       p_g_x = p_ay_x.reshape(-1, self.n_groups * self.n_classes)
-    risk = np.sum(p_y_x[..., None] * self.cls_loss_fn[None, :], axis=1)
+
     if self.remove_unused and self.n_groups == 2:
       if self.fairness_criterion == 'tpr':
         p_g_x = p_g_x.reshape(-1, self.n_groups, self.n_classes)[:, :, 1]
+        # p_g_x.shape = (n_examples, n_groups)
       elif self.fairness_criterion == 'fpr':
         p_g_x = p_g_x.reshape(-1, self.n_groups, self.n_classes)[:, :, 0]
-    return risk, p_g_x
+
+    res['probas_group'] = p_g_x
+    res['risk'] = np.sum(p_y_x[..., None] * self.cls_loss_fn[None, :], axis=1)
+    return res
 
   def fit(self,
           p_a_x: Optional[np.ndarray] = None,
@@ -261,7 +281,7 @@ class LinearPostSimple:
           solve_kwargs: Optional[dict[str, Any]] = None,
           solve_primal: bool = True) -> 'LinearPostBasic':
     self.postprocessor.fit(
-        *self.get_risk_and_group_probas_(p_a_x, p_y_x, p_ay_x),
+        **self.get_risk_and_group_probas_(p_a_x, p_y_x, p_ay_x),
         solver=solver,
         solve_kwargs=solve_kwargs,
         solve_primal=solve_primal,
@@ -273,11 +293,11 @@ class LinearPostSimple:
                     p_y_x: Optional[np.ndarray] = None,
                     p_ay_x: Optional[np.ndarray] = None) -> np.ndarray:
     return self.postprocessor.predict_score(
-        *self.get_risk_and_group_probas_(p_a_x, p_y_x, p_ay_x))
+        **self.get_risk_and_group_probas_(p_a_x, p_y_x, p_ay_x))
 
   def predict(self,
               p_a_x: Optional[np.ndarray] = None,
               p_y_x: Optional[np.ndarray] = None,
               p_ay_x: Optional[np.ndarray] = None) -> np.ndarray:
     return self.postprocessor.predict(
-        *self.get_risk_and_group_probas_(p_a_x, p_y_x, p_ay_x))
+        **self.get_risk_and_group_probas_(p_a_x, p_y_x, p_ay_x))

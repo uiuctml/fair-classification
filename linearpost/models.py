@@ -30,12 +30,13 @@ class MLPClassifier:
     if self.n_classes is None:
       self.n_classes = max(y) + 1
 
-    X = torch.from_numpy(X).to(self.device).float()
-    y = torch.from_numpy(y).to(self.device).long()
+    X = torch.as_tensor(X).to(self.device, dtype=torch.float32)
+    y = torch.as_tensor(y).to(self.device, dtype=torch.long)
 
     if sample_weight is None:
-      sample_weight = np.ones(len(y))
-    sample_weight = torch.from_numpy(sample_weight).to(self.device).float()
+      sample_weight = [1] * len(y)
+    sample_weight = torch.as_tensor(sample_weight).to(self.device,
+                                                      dtype=torch.float32)
 
     # Initialize layers
     torch.manual_seed(self.random_state)
@@ -76,7 +77,7 @@ class MLPClassifier:
 
   def predict_proba(self, X):
     self.model.eval()
-    X = torch.from_numpy(X).to(self.device).float()
+    X = torch.as_tensor(X).to(self.device, dtype=torch.float32)
     probas = []
     with torch.no_grad():
       for x in torch.utils.data.DataLoader(

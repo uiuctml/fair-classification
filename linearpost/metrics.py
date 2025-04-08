@@ -9,6 +9,8 @@ import matplotlib.pyplot as plt
 import scipy.stats
 import sklearn.metrics
 
+from .utils import edgewise_simplex_subdivision
+
 
 def bootstrap_std_error(
     metric_fn: Callable[..., float]
@@ -37,8 +39,8 @@ def bootstrap_std_error(
 def accuracy(y_true, y_preds, return_std_err=False):
   """Compute accuracy."""
   correct = y_true == y_preds
-  accuracy = np.mean(correct)
-  res = (accuracy,)
+  acc = np.mean(correct)
+  res = (acc,)
   if return_std_err:
     std_err = scipy.stats.sem(correct)
     res += (std_err,)
@@ -160,54 +162,6 @@ def fpr_disparity(y_true,
       weighted_sum=weighted_sum,
       ord=ord,
   )
-
-
-def edgewise_simplex_subdivision(x, k=1):
-  n = len(x)
-  d = x.shape[1]
-
-  cumsum = np.cumsum(x * k, axis=1)
-
-  # get the boundaries and keep their associated colors
-  boundaries = np.where(cumsum[:, :-1] != k, cumsum[:, :-1] % 1, 1)
-  # last color should have cumsum = 1
-  boundaries = np.concatenate([boundaries, np.ones((n, 1))], axis=1)
-  boundaries_c = np.tile(np.arange(d), (n, 1))
-
-  # sort the boundaries
-  I = np.argsort(boundaries, axis=1, stable=True)
-  boundaries = np.take_along_axis(boundaries, I, axis=1)
-  boundaries_c = np.take_along_axis(boundaries_c, I, axis=1)
-
-  # cutoffs at which a color is yield
-  cutoffs = boundaries[:, None, :] + np.arange(k)[None, :, None]
-  cutoffs = cutoffs.reshape(n, -1)
-  # in case some rows do not sum to 1
-  cutoffs = np.concatenate([cutoffs[:, :-1], cumsum[:, -1][:, None]], axis=1)
-
-  # count the number of occurrences of each color
-  counts = [np.zeros(n, dtype=int)]
-
-  for i in range(d):
-
-    # cumulative count for colors 1 to i
-    c = (cutoffs < cumsum[:, i][:, None]).sum(axis=1)
-
-    # handle ties
-    ties = cutoffs == cumsum[:, i][:, None]
-    ind = np.where(boundaries_c == i)[1]
-    mask = np.arange(d)[None, :] <= ind[:, None]
-    c += (ties & np.tile(mask, (1, k))).sum(axis=1)
-
-    counts.append(c - counts.pop(-1))
-    counts.append(c)  # also remember the cumulative count
-
-  counts = counts[:-1]
-
-  # C[j, i] is the number of times color i appears in M[j], the color scheme
-  # of the j-th example
-  C = np.stack(counts, axis=1)
-  return C
 
 
 def binned_calibration_error(probas, y_true, k=2):
@@ -341,9 +295,7 @@ class MetricLogger:
     self.n_entries += 1
 
   def log_evaluate(self, y_true, y_preds, groups=None, **kwargs):
-    metrics = {
-        k: v if isinstance(v, tuple) else (v,) for k, v in kwargs.items()
-    }
+    metrics = {k: v if isinstance(v, tuple) else (v,) for k, v in kwargs.items()}
     metrics.update(
         evaluate(y_true,
                  y_preds,
@@ -356,7 +308,11 @@ class MetricLogger:
     self.log(metrics)
     return metrics
 
-  def plot(self, fairness_criteria, performance_metric='accuracy', ax=None):
+  def plot(self,
+           fairness_criteria,
+           performance_metric='accuracy',
+           ax=None,
+           **kwargs):
     if ax is None:
       fig, ax = plt.subplots(1, 1)
     df_metrics = self.df
@@ -366,7 +322,12 @@ class MetricLogger:
             df_metrics[performance_metric]['std'].values)
     xerr = (None if 'std' not in df_metrics[fairness_criteria] else
             df_metrics[fairness_criteria]['std'].values)
-    markers, caps, bars = ax.errorbar(y=y, x=x, yerr=yerr, xerr=xerr, fmt='o')
+    markers, caps, bars = ax.errorbar(y=y,
+                                      x=x,
+                                      yerr=yerr,
+                                      xerr=xerr,
+                                      fmt='o',
+                                      **kwargs)
     for bar in bars:
       bar.set_alpha(0.5)
     ax.set_ylabel(performance_metric)
@@ -411,10 +372,9 @@ class MetricLogger:
         if name in metrics:
           continue
         k_mean = (name, 'mean')
+        mean = self.all_metrics[k_mean][i]
         k_std = (name, 'std')
-        mean = self.all_metrics.get(k_mean, [None])[i]
-        std = self.all_metrics.get(k_std, [None])[i]
-        if mean is not None:
-          metrics[name] = (mean,) if std is None else (mean, std)
-      s += self.stringify(metrics) + '\n'
+        std = self.all_metrics[k_std][i] if k_std in self.all_metrics else None
+        metrics[name] = (mean,) if std is None else (mean, std)
+      s += self.stringify(metrics) + '\n\n'
     return s.strip()
