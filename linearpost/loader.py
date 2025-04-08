@@ -1,5 +1,11 @@
+'''
+For tabular datasets, it is important to "Mark categorical columns" in order for
+dataset.Dataset.preprocess_tabular to one-hot encode them.
+'''
+
 import csv
 import os
+import pickle
 import urllib.request
 
 import numpy as np
@@ -252,4 +258,50 @@ def compas(data_dir, sensitive_attr='sex', keep_textual_features=False):
       'group_names': group_names,
       # 'column_names': column_names,
       # 'category_names': category_names
+  }
+
+
+def biasbios(data_dir):
+  train_path = f'{data_dir}/train.pickle'
+  test_path = f'{data_dir}/test.pickle'
+  dev_path = f'{data_dir}/dev.pickle'
+  if any(not os.path.exists(p) for p in [train_path, test_path, dev_path]):
+    os.makedirs(data_dir, exist_ok=True)
+    urllib.request.urlretrieve(
+        'https://storage.googleapis.com/ai2i/nullspace/biasbios/train.pickle',
+        train_path)
+    urllib.request.urlretrieve(
+        'https://storage.googleapis.com/ai2i/nullspace/biasbios/test.pickle',
+        test_path)
+    urllib.request.urlretrieve(
+        'https://storage.googleapis.com/ai2i/nullspace/biasbios/dev.pickle',
+        dev_path)
+
+  bios = []
+  titles = []
+  genders = []
+  splits = {'train': 0, 'test': 0, 'dev': 0}
+  for split, path in zip(['train', 'test', 'dev'],
+                         [train_path, test_path, dev_path]):
+    with open(path, 'rb') as pickle_file:
+      for row in pickle.load(pickle_file):
+        bios.append(row['hard_text_untokenized'])
+        titles.append(row['p'])
+        genders.append(row['g'])
+        splits[split] += 1
+
+  labels = np.array(titles)
+  groups = np.array(genders)
+
+  # Encode labels and groups
+  label_names, labels = np.unique(labels, return_inverse=True)
+  group_names, groups = np.unique(groups, return_inverse=True)
+
+  return {
+      'data': bios,
+      'labels': labels,
+      'groups': groups,
+      'label_names': label_names,
+      'group_names': group_names,
+      'splits': splits
   }

@@ -1,9 +1,10 @@
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Optional, Sequence, Callable
 
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+from torch.utils.data import DataLoader
 
 DataType = pd.DataFrame | np.ndarray | list
 
@@ -38,13 +39,17 @@ class Dataset:
     return self.X[name]
 
   def __setitem__(self, name, data):
-    self.X[name] = data
-    self.features[name] = Feature()
+    self.add_column(name, data)
 
-  def add_feature(self,
-                  name: str,
-                  data: DataType,
-                  feature: Optional[Feature] = None) -> None:
+  def __len__(self):
+    if not self.X:
+      return 0
+    return len(next(iter(self.X.values())))
+
+  def add_column(self,
+                 name: str,
+                 data: DataType,
+                 feature: Optional[Feature] = None) -> None:
     self.X[name] = data
     if feature is None:
       feature = Feature()
@@ -76,13 +81,12 @@ class Dataset:
                     names: Sequence[str],
                     shuffle: bool = False,
                     seed: Optional[int] = None) -> None:
-    n_data = len(next(iter(self.X.values())))
     if shuffle:
-      idx = np.random.RandomState(seed).permutation(n_data)
+      idx = np.random.RandomState(seed).permutation(len(self))
     else:
-      idx = np.arange(n_data)
+      idx = np.arange(len(self))
     if isinstance(sizes[0], float):
-      split_idx = np.cumsum([s * n_data for s in sizes]).astype(int)
+      split_idx = np.cumsum([s * len(self) for s in sizes]).astype(int)
     else:
       split_idx = np.cumsum(sizes)
     idxs = np.split(idx, split_idx[:-1])
@@ -94,9 +98,8 @@ class Dataset:
     features = next(iter(splits.values())).features
     split_idx = {}
     for split_name, split in splits.items():
-      n_data = len(split.X[next(iter(features))])
       N = sum(len(idx) for idx in split_idx.values())
-      split_idx[split_name] = np.arange(N, N + n_data)
+      split_idx[split_name] = np.arange(N, N + len(split))
       for name in features:
         x = split.X[name]
         if name not in X:
@@ -136,6 +139,21 @@ class Dataset:
       dataset.create_splits(sizes=list(D['splits'].values()),
                             names=list(D['splits'].keys()))
     return dataset
+
+  def to_dataloader(self,
+                    columns: Optional[Sequence[str]] = None,
+                    batch_size: int = 1,
+                    collate_fn: Optional[Callable] = None,
+                    shuffle: bool = False) -> DataLoader:
+    if columns is None:
+      columns = list(self.X.keys())
+    rows = [{
+        name: self.X[name][i] for name in columns
+    } for i in range(len(self))]
+    return DataLoader(rows,
+                      batch_size=batch_size,
+                      collate_fn=collate_fn,
+                      shuffle=shuffle)
 
   def statistics_categorical_joint(self,
                                    name_1: str,

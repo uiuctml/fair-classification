@@ -11,7 +11,7 @@ import numpy as np
 
 from sklearn.linear_model import LogisticRegression
 from lightgbm import LGBMClassifier
-from models import MLPClassifier
+from linearpost.models import MLPClassifier
 
 from linearpost.dataset import Dataset
 from linearpost import loader
@@ -28,7 +28,7 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
         data_dir,
         sensitive_attr=sensitive_attr,
     )
-    split_sizes = [0.25, 0.25, 0.2, 0.3]
+    split_sizes = [0.3, 0.2, 0.2, 0.3]
 
   elif name == 'compas':
     sensitive_attr = 'race'
@@ -36,7 +36,7 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
         data_dir,
         sensitive_attr=sensitive_attr,
     )
-    split_sizes = [0.25, 0.25, 0.2, 0.3]
+    split_sizes = [0.3, 0.2, 0.2, 0.3]
 
   elif name == 'acsincome2':
     sensitive_attr = 'SEX'
@@ -91,6 +91,7 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
   )
   if remove_sensitive_attr:
     D['X'].drop([sensitive_attr], inplace=True, axis=1)
+  print('Dataset columns:', D['X'].columns.tolist())
   D.preprocess_tabular('X', train_split_name='pre')
   return D
 
@@ -118,35 +119,34 @@ def main():
   data_dir_base = args.data_dir_base
   criteria = args.criteria
   models = args.models
-  attribute_aware = [args.attribute_aware] or [True, False]
   results_dir = args.results_dir
   cache_dir = args.cache_dir
   seed = args.seed
   device = args.device or 'cuda' if torch.cuda.is_available() else 'cpu'
-
-  dataset_name = 'compas'
-  data_dir_base = '/data/common/llm-group-fairness/datasets/'
-  criteria = ['sp', 'tpr', 'eo']
-  models = ['logreg', 'lgbm']
-  attribute_aware = [True, False]
-  results_dir = 'results'
-  cache_dir = 'cache'
-  seed = 33
-  device = 'cuda' if torch.cuda.is_available() else 'cpu'
+  attribute_awareness = [
+      x for x in [args.attr_aware, args.attr_blind] if x is not None
+  ]
+  if not attribute_awareness:
+    attribute_awareness = [True, False]
 
   os.makedirs(data_dir_base, exist_ok=True)
   os.makedirs(results_dir, exist_ok=True)
   os.makedirs(cache_dir, exist_ok=True)
 
-  for aware in attribute_aware:
+  for aware in attribute_awareness:
     for model in models:
       for criterion in criteria:
+        print(
+            f"Working on {dataset_name} with {model} for {criterion} ({'aware' if aware else 'blind'})"
+        )
 
         cache_fname = f"{dataset_name}_{'aware' if aware else 'blind'}_{model}.pickle"
         cache_path = os.path.join(cache_dir, cache_fname)
         if os.path.exists(cache_path):
-          print(f"Loading cached dataset: {cache_path}")
           D_post = pickle.load(open(cache_path, 'rb'))
+          n_classes = D_post.features['labels'].n_categories
+          n_groups = D_post.features['groups'].n_categories
+          print(f"Loaded cached dataset from {cache_path}")
 
         else:
           D = get_dataset(dataset_name,
@@ -183,14 +183,13 @@ def main():
 
           with open(cache_path, 'wb') as f:
             pickle.dump(D_post, f)
+            print(f"Cached dataset to {cache_path}")
 
         result_fname = f"{{split}}_linearpost_{dataset_name}_{'aware' if aware else 'blind'}_{model}_{criterion}.csv"
         result_path = os.path.join(results_dir, result_fname)
         loggers = {}
         for split in ['val', 'test']:
-          result_path_split = result_path.format(split=split)
-          loggers[split] = metrics.MetricLogger.from_csv(
-              result_path_split,
+          loggers[split] = metrics.MetricLogger(
               n_classes=n_classes,
               n_groups=n_groups,
               return_std_err=True,
@@ -267,7 +266,8 @@ def parse_args():
       default=["logreg", "lgbm", "mlp"],
       choices=["logreg", "lgbm", "mlp"],
   )
-  parser.add_argument("--attribute_aware", type=bool, default=None)
+  parser.add_argument('--attr_aware', action='store_true', default=None)
+  parser.add_argument('--attr_blind', action='store_false', default=None)
   parser.add_argument("--seed", type=int, default=33)
   parser.add_argument("--device", type=str, default=None)
 

@@ -47,27 +47,24 @@ def accuracy(y_true, y_preds, return_std_err=False):
 
 def output_dists(y_preds, groups, n_classes, n_groups):
   group_counts = np.bincount(groups, minlength=n_groups)  # shape = (n_groups,)
-  g_p, counts = np.unique(np.stack((groups, y_preds), axis=1),
-                          axis=0,
-                          return_counts=True)
-  dists = np.zeros((n_groups, n_classes), dtype=float)
-  g, p = g_p.T
-  dists[g, p] = counts / group_counts[g]  # normalize
+  pred_counts = np.array([
+      np.bincount(y_preds[groups == a], minlength=n_classes)
+      for a in range(n_groups)
+  ])
+  dists = pred_counts / group_counts[:, None]  # shape = (n_groups, n_classes)
   return (dists, group_counts / group_counts.sum())
 
 
 def confusion_matrix(y_true, y_preds, groups, n_classes, n_groups):
-  g_y_p, counts = np.unique(np.stack((groups, y_true, y_preds), axis=1),
-                            axis=0,
-                            return_counts=True)
-  cm = np.zeros((n_groups, n_classes, n_classes), dtype=float)
-  g, y, p = g_y_p.T
-  cm[g, y, p] = counts
+  cm = np.array([
+      sklearn.metrics.confusion_matrix(
+          y_true[groups == a],
+          y_preds[groups == a],
+          labels=np.arange(n_classes)).astype(float) for a in range(n_groups)
+  ])
   g_y_counts = cm.sum(axis=2)  # shape = (n_groups, n_classes)
-  cm = np.divide(cm,
-                 g_y_counts[..., None],
-                 out=np.zeros_like(cm),
-                 where=g_y_counts[..., None] != 0)  # avoid division by zero
+  with np.errstate(invalid='ignore'):
+    cm = np.nan_to_num(cm / g_y_counts[..., None], nan=0.0)  # normalize
   return (cm, g_y_counts / g_y_counts.sum())
 
 
