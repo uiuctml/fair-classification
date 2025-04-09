@@ -180,33 +180,42 @@ def binned_calibration_error(probas, y_true, k=2):
 ## Logging helpers
 
 
-def evaluate(y_true,
-             y_preds,
-             groups=None,
+def evaluate(y_true: Optional[np.ndarray] = None,
+             y_preds: Optional[np.ndarray] = None,
+             groups: Optional[np.ndarray] = None,
              n_classes: Optional[int] = None,
              n_groups: Optional[int] = None,
              return_std_err: bool = False,
+             fairness_only: bool = False,
              n_resamples: int = 1000,
              random_state: Optional[int] = None):
-  n_classes_ = n_classes
-  n_classes = n_classes_ or y_true.max() + 1
-
+  n_classes_provided, n_classes = n_classes, n_classes or y_true.max() + 1
+  if n_classes == 2 and n_classes_provided is None:
+    warnings.warn(
+        "n_classes is not provided and inferred to be 2. Computing binary TPR disparity."
+    )
   if groups is not None and n_groups is None:
     n_groups = groups.max() + 1
 
   metrics = {}
 
+  if y_preds is None:
+    return metrics
+
   # performance metrics
-  metrics['accuracy'] = accuracy(y_true, y_preds, return_std_err=return_std_err)
-  pr_mode = ['binary'] if n_classes == 2 else ['micro', 'macro']
-  for mode in pr_mode:
-    precision, recall, f1, _ = sklearn.metrics.precision_recall_fscore_support(
-        y_true, y_preds, average=mode, zero_division=0)
-    metrics[f'precision_{mode}'] = (precision,)
-    metrics[f'recall_{mode}'] = (recall,)
-    metrics[f'f1_{mode}'] = (f1,)
-  if n_classes == 2:
-    metrics['fpr_binary'] = ((y_preds[y_true == 0] == 1).mean(),)
+  if y_true is not None and not fairness_only:
+    metrics['accuracy'] = accuracy(y_true,
+                                   y_preds,
+                                   return_std_err=return_std_err)
+    pr_mode = ['binary'] if n_classes == 2 else ['micro', 'macro']
+    for mode in pr_mode:
+      precision, recall, f1, _ = sklearn.metrics.precision_recall_fscore_support(
+          y_true, y_preds, average=mode, zero_division=0)
+      metrics[f'precision_{mode}'] = (precision,)
+      metrics[f'recall_{mode}'] = (recall,)
+      metrics[f'f1_{mode}'] = (f1,)
+    if n_classes == 2:
+      metrics['fpr_binary'] = ((y_preds[y_true == 0] == 1).mean(),)
 
   # fairness metrics
   if groups is not None:
@@ -223,39 +232,31 @@ def evaluate(y_true,
                                                     weighted_sum=True,
                                                     ord=1,
                                                     **kwargs)
-    metrics['tpr_disparity'] = tpr_disparity(y_true, y_preds, groups, **kwargs)
-    metrics['tpr_disparity_weighted'] = tpr_disparity(y_true,
+    if y_true is not None:
+      tpr_metric_name = 'tpr_binary_disparity' if n_classes == 2 else 'tpr_micro_disparity'
+      metrics[f'{tpr_metric_name}'] = tpr_disparity(y_true, y_preds, groups,
+                                                    **kwargs)
+      metrics[f'{tpr_metric_name}_weighted'] = tpr_disparity(y_true,
+                                                             y_preds,
+                                                             groups,
+                                                             weighted_sum=True,
+                                                             ord=1,
+                                                             **kwargs)
+      if n_classes > 2:
+        metrics['tpr_micro_disparity_rms'] = tpr_disparity(
+            y_true, y_preds, groups, ord=2, **kwargs) / np.sqrt(n_classes)
+      if n_classes == 2:
+        metrics['fpr_binary_disparity'] = fpr_disparity(y_true, y_preds, groups,
+                                                        **kwargs)
+        metrics['fpr_binary_disparity_weighted'] = fpr_disparity(
+            y_true, y_preds, groups, weighted_sum=True, ord=1, **kwargs)
+      metrics['eo_disparity'] = eo_disparity(y_true, y_preds, groups, **kwargs)
+      metrics['eo_disparity_weighted'] = eo_disparity(y_true,
                                                       y_preds,
                                                       groups,
                                                       weighted_sum=True,
                                                       ord=1,
                                                       **kwargs)
-    if n_classes > 2:
-      if n_classes == 2 and n_classes_ is None:
-        warnings.warn(
-            "n_classes is not provided and inferred to be 2. Computing binary TPR disparity."
-        )
-      metrics['tpr_disparity_rms'] = tpr_disparity(y_true,
-                                                   y_preds,
-                                                   groups,
-                                                   ord=2,
-                                                   **kwargs)
-    if n_classes == 2:
-      metrics['fpr_disparity'] = fpr_disparity(y_true, y_preds, groups,
-                                               **kwargs)
-      metrics['fpr_disparity_weighted'] = fpr_disparity(y_true,
-                                                        y_preds,
-                                                        groups,
-                                                        weighted_sum=True,
-                                                        ord=1,
-                                                        **kwargs)
-    metrics['eo_disparity'] = eo_disparity(y_true, y_preds, groups, **kwargs)
-    metrics['eo_disparity_weighted'] = eo_disparity(y_true,
-                                                    y_preds,
-                                                    groups,
-                                                    weighted_sum=True,
-                                                    ord=1,
-                                                    **kwargs)
   return metrics
 
 
@@ -300,8 +301,8 @@ class MetricLogger:
         evaluate(y_true,
                  y_preds,
                  groups,
-                 n_classes=self.n_classes,
-                 n_groups=self.n_groups,
+                 self.n_classes,
+                 self.n_groups,
                  return_std_err=self.return_std_err,
                  n_resamples=self.n_resamples,
                  random_state=self.random_state))

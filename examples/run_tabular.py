@@ -207,7 +207,11 @@ def main():
             n_classes=n_classes,
             n_groups=n_groups,
         )
-        alpha_max = metrics_baseline[f'{criterion}_disparity']
+        if criterion == 'tpr':
+          criterion_metric_name = 'tpr_binary_disparity' if n_classes == 2 else 'tpr_micro_disparity'
+        else:
+          criterion_metric_name = f'{criterion}_disparity'
+        alpha_max = metrics_baseline[criterion_metric_name]
         alphas = [float('inf')] + list(
             np.linspace(0.001, alpha_max, num=16).flatten())[:-1][::-1]
 
