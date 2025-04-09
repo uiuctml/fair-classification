@@ -263,7 +263,7 @@ def evaluate(y_true: Optional[np.ndarray] = None,
 class MetricLogger:
 
   def __init__(self,
-               n_classes: int,
+               n_classes: Optional[int] = None,
                n_groups: Optional[int] = None,
                return_std_err: bool = False,
                n_resamples: int = 1000,
@@ -344,13 +344,28 @@ class MetricLogger:
     # print(f"Metrics saved to {path}")
 
   @classmethod
-  def from_csv(cls, path: str, n_classes, *args, **kwargs) -> 'MetricLogger':
+  def from_csv(cls,
+               path: str,
+               n_classes: Optional[int] = None,
+               *args,
+               **kwargs) -> 'MetricLogger':
     logger = cls(n_classes, *args, **kwargs)
     if os.path.exists(path):
       df = pd.read_csv(path, header=[0, 1], index_col=[0])
       logger.n_entries = len(df)
       logger.all_metrics = df.to_dict(orient='list')
     return logger
+
+  def to_path(self, path: str):
+    self.to_csv(path)
+
+  @classmethod
+  def from_path(cls,
+                path: str,
+                n_classes: Optional[int] = None,
+                *args,
+                **kwargs) -> 'MetricLogger':
+    return cls.from_csv(path, n_classes, *args, **kwargs)
 
   @staticmethod
   def stringify(metrics):
