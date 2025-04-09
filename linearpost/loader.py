@@ -13,6 +13,32 @@ import pandas as pd
 
 import folktables
 
+from .dataset import Dataset, Array, Categorical
+
+
+def dataset_from_loader_outputs(outputs) -> Dataset:
+  data = {'X': outputs['data'], 'labels': outputs['labels']}
+  features = {
+      'X':
+          Array(column_names=outputs['column_names']
+                if 'column_names' in outputs else None,
+                category_names=outputs['category_names']
+                if 'category_names' in outputs else None),
+      'labels':
+          Categorical(n_categories=len(outputs['label_names']),
+                      category_names=outputs['label_names'])
+  }
+  if 'groups' in outputs:
+    data['groups'] = outputs['groups']
+    features['groups'] = Categorical(n_categories=len(outputs['group_names']),
+                                     category_names=outputs['group_names'])
+  dataset = Dataset(data=data, features=features)
+  if 'splits' in outputs:
+    dataset.create_splits(split_sizes=list(outputs['splits'].values()),
+                          split_names=list(outputs['splits'].keys()))
+  dataset.create_index()
+  return dataset
+
 
 def adult(data_dir, sensitive_attr='sex'):
   if isinstance(sensitive_attr, str):
@@ -112,7 +138,6 @@ def acsincome(data_dir, n_classes=2, sensitive_attr='SEX'):
   category_names = {}
   with open(data_path, 'r') as f:
     reader = csv.reader(f)
-    i = 0
     for row in reader:
       if row[1] in features:
         if row[0] == 'NAME':
@@ -220,8 +245,8 @@ def compas(data_dir, sensitive_attr='sex', keep_textual_features=False):
 
   # drop 'c_jail_in' and 'c_jail_out'
   # drop columns that won't be used
-  dropCol = ['c_jail_in', 'c_jail_out', 'days_b_screening_arrest']
-  df.drop(dropCol, inplace=True, axis=1)
+  drop_col = ['c_jail_in', 'c_jail_out', 'days_b_screening_arrest']
+  df.drop(drop_col, inplace=True, axis=1)
 
   # keep only African-American and Caucasian
   df = df.loc[df['race'].isin(['African-American', 'Caucasian']), :]

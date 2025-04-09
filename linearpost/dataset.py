@@ -1,26 +1,28 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, Sequence, Callable
+import pickle
 
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
+from torch import Tensor
 
-DataType = pd.DataFrame | np.ndarray | list
+DataType = pd.DataFrame | np.ndarray | Tensor | list
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Feature:
-  pass
+  metadata: dict = field(default_factory=dict)
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Categorical(Feature):
-  n_categories: int
+  n_categories: Optional[int] = -1
   category_names: Optional[list[str]] = None
 
 
-@dataclass
+@dataclass(kw_only=True)
 class Array(Feature):
   column_names: Optional[list[str]] = None
   category_names: Optional[list[str]] = None
@@ -29,146 +31,184 @@ class Array(Feature):
 class Dataset:
 
   def __init__(self,
-               X: Optional[dict[str, DataType]] = None,
-               features: Optional[dict[str, Feature]] = None):
-    self.X = X or {}
+               data: Optional[dict[str, DataType]] = None,
+               features: Optional[dict[str, Feature]] = None,
+               split_idx: Optional[dict[str, Sequence[int]]] = None):
+    self.data = data or {}
     self.features = features or {}
-    self.split_idx = {}
-
-  def __getitem__(self, name):
-    return self.X[name]
-
-  def __setitem__(self, name, data):
-    self.add_column(name, data)
+    self.split_idx = split_idx or {}
 
   def __len__(self):
-    if not self.X:
+    if not self.data:
       return 0
-    return len(next(iter(self.X.values())))
+    return len(next(iter(self.data.values())))
 
-  def add_column(self,
+  def create_index(self) -> None:
+    self.set_column('_index', np.arange(len(self)))
+
+  @property
+  def column_names(self) -> list[str]:
+    return list(self.data.keys())
+
+  def items(self):
+    return self.data.items()
+
+  def __setitem__(self, column_name, data):
+    self.set_column(column_name, data)
+
+  def set_column(self,
                  name: str,
                  data: DataType,
                  feature: Optional[Feature] = None) -> None:
-    self.X[name] = data
+    self.data[name] = data
     if feature is None:
       feature = Feature()
     self.features[name] = feature
 
-  def get_split(self, split_name: str) -> 'Dataset':
-    X = {}
-    idx = self.split_idx[split_name]
-    for name, data in self.X.items():
-      if isinstance(data, pd.DataFrame):
-        X[name] = data.iloc[idx]
-      elif isinstance(data, np.ndarray):
-        X[name] = data[idx]
-      elif isinstance(data, list):
-        X[name] = [data[i] for i in idx]
-      else:
-        raise NotImplementedError
-    return Dataset(X=X, features=self.features)
+  def __getitem__(
+      self, column_names: str | Sequence[str]) -> DataType | tuple[DataType]:
+    if isinstance(column_names, str):
+      return self.data[column_names]
+    else:
+      return tuple(self.data[name] for name in column_names)
 
-  def get_splits(
-      self,
-      split_names: Optional[Sequence[str]] = None) -> dict[str, 'Dataset']:
-    if split_names is None:
-      split_names = list(self.split_idx.keys())
-    return {name: self.get_split(name) for name in split_names}
+  class ColumnSubsetter:
+
+    def __init__(self, dataset: 'Dataset'):
+      self.dataset = dataset
+
+    def __getitem__(self, column_names: str | Sequence[str]) -> 'Dataset':
+      if isinstance(column_names, str):
+        column_names = [column_names]
+      return Dataset(
+          data={k: self.dataset[k] for k in column_names},
+          features={k: self.dataset.features[k] for k in column_names},
+          split_idx=self.dataset.split_idx)
+
+  @property
+  def column(self):
+    return self.ColumnSubsetter(self)
+
+  class RowSubsetter:
+
+    def __init__(self, dataset: 'Dataset'):
+      self.dataset = dataset
+
+    def __getitem__(self, *args, **kwargs):
+      # TODO: slicing removes split information, maybe take set intersection?
+      data = {}
+      for column_name, d in self.dataset.data.items():
+        if isinstance(d, pd.DataFrame):
+          data[column_name] = d.iloc.__getitem__(*args, **kwargs)
+        elif isinstance(d, (np.ndarray, Tensor)):
+          data[column_name] = d.__getitem__(*args)
+        elif isinstance(d, list):
+          if len(args) == 1 and isinstance(args[0], slice):
+            data[column_name] = d[args[0]]
+          else:
+            data[column_name] = [d[i] for i in args[0]]
+        else:
+          raise NotImplementedError
+      dataset = Dataset(data=data, features=self.dataset.features)
+      return dataset
+
+  @property
+  def iloc(self):
+    return self.RowSubsetter(self)
+
+  def sample(self,
+             n: int,
+             replace: bool = False,
+             seed: Optional[int] = None) -> 'Dataset':
+    idx = np.random.default_rng(seed).choice(len(self), size=n, replace=replace)
+    return self.iloc[idx]
+
+  class Splitter:
+
+    def __init__(self, dataset: 'Dataset'):
+      self.dataset = dataset
+
+    def get_split(self, split_name: str) -> 'Dataset':
+      dataset = self.dataset.iloc[self.dataset.split_idx[split_name]]
+      dataset.split_idx = {}
+      return dataset
+
+    def get_splits(self, split_names: Sequence[str]) -> 'Dataset':
+      all_idx = []
+      new_split_idx = {}
+      for split_name in split_names:
+        s = sum(len(I) for I in all_idx)
+        I = self.dataset.split_idx[split_name]
+        t = s + len(I)
+        all_idx.append(I)
+        new_split_idx[split_name] = np.arange(s, t)
+      dataset = self.dataset.iloc[np.concatenate(all_idx)]
+      dataset.split_idx = new_split_idx
+      return dataset
+
+    def __getitem__(self, split_names: str | Sequence[str]) -> 'Dataset':
+      if isinstance(split_names, str):
+        return self.get_split(split_names)
+      else:
+        return self.get_splits(split_names)
+
+  @property
+  def split(self):
+    return self.Splitter(self)
 
   def create_splits(self,
-                    sizes: Sequence[int | float],
-                    names: Sequence[str],
+                    split_sizes: Sequence[int | float],
+                    split_names: Sequence[str],
                     shuffle: bool = False,
                     seed: Optional[int] = None) -> None:
     if shuffle:
-      idx = np.random.RandomState(seed).permutation(len(self))
+      idx = np.random.default_rng(seed).permutation(len(self))
     else:
       idx = np.arange(len(self))
-    if isinstance(sizes[0], float):
-      split_idx = np.cumsum([s * len(self) for s in sizes]).astype(int)
+    if isinstance(split_sizes[0], float):
+      split_idx = np.cumsum([s * len(self) for s in split_sizes]).astype(int)
     else:
-      split_idx = np.cumsum(sizes)
+      split_idx = np.cumsum(split_sizes)
     idxs = np.split(idx, split_idx[:-1])
-    self.split_idx = {name: idx for name, idx in zip(names, idxs)}
+    self.split_idx = dict(zip(split_names, idxs))
+
+  def to_path(self, path: str) -> None:
+    with open(path, 'wb') as f:
+      pickle.dump(self, f)
 
   @classmethod
-  def from_splits(cls, splits: dict[str, 'Dataset']) -> 'Dataset':
-    X = {}
-    features = next(iter(splits.values())).features
-    split_idx = {}
-    for split_name, split in splits.items():
-      N = sum(len(idx) for idx in split_idx.values())
-      split_idx[split_name] = np.arange(N, N + len(split))
-      for name in features:
-        x = split.X[name]
-        if name not in X:
-          X[name] = x
-        else:
-          if isinstance(X[name], pd.DataFrame) and isinstance(x, pd.DataFrame):
-            X[name] = pd.concat([X[name], x], axis=0)
-          elif isinstance(X[name], np.ndarray) and isinstance(x, np.ndarray):
-            X[name] = np.concatenate((X[name], x), axis=0)
-          elif isinstance(X[name], list) and isinstance(x, list):
-            X[name].extend(x)
-          else:
-            raise NotImplementedError
-    dataset = cls(X=X, features=features)
-    dataset.split_idx = split_idx
-    return dataset
-
-  @classmethod
-  def from_loader_outputs(cls, D) -> 'Dataset':
-    X = {'X': D['data'], 'labels': D['labels']}
-    features = {
-        'X':
-            Array(
-                column_names=D['column_names'] if 'column_names' in D else None,
-                category_names=D['category_names']
-                if 'category_names' in D else None),
-        'labels':
-            Categorical(n_categories=len(D['label_names']),
-                        category_names=D['label_names'])
-    }
-    if 'groups' in D:
-      X['groups'] = D['groups']
-      features['groups'] = Categorical(n_categories=len(D['group_names']),
-                                       category_names=D['group_names'])
-    dataset = cls(X=X, features=features)
-    if 'splits' in D:
-      dataset.create_splits(sizes=list(D['splits'].values()),
-                            names=list(D['splits'].keys()))
-    return dataset
+  def from_path(cls, path: str) -> 'Dataset':
+    with open(path, 'rb') as f:
+      d_ = pickle.load(f)
+    return cls(d_.data, d_.features, d_.split_idx)
 
   def to_dataloader(self,
-                    columns: Optional[Sequence[str]] = None,
+                    column_names: Optional[Sequence[str]] = None,
                     batch_size: int = 1,
                     collate_fn: Optional[Callable] = None,
                     shuffle: bool = False) -> DataLoader:
-    if columns is None:
-      columns = list(self.X.keys())
-    rows = [{
-        name: self.X[name][i] for name in columns
-    } for i in range(len(self))]
+    if column_names is None:
+      column_names = list(self.data.keys())
+    rows = [{n: self.data[n][i] for n in column_names} for i in range(len(self))]
     return DataLoader(rows,
                       batch_size=batch_size,
                       collate_fn=collate_fn,
                       shuffle=shuffle)
 
   def statistics_categorical_joint(self,
-                                   name_1: str,
-                                   name_2: str,
+                                   column_name_1: str,
+                                   column_name_2: str,
                                    normalize: bool = False) -> pd.DataFrame:
-    f1, f2 = self.features[name_1], self.features[name_2]
+    f1, f2 = self.features[column_name_1], self.features[column_name_2]
     assert isinstance(f1, Categorical) and isinstance(f2, Categorical)
     category_names_1 = (f1.category_names if f1.category_names is not None else
                         np.arange(f1.n_categories).astype(str).tolist())
     category_names_2 = (f2.category_names if f2.category_names is not None else
                         np.arange(f2.n_categories).astype(str).tolist())
     df_stat = pd.DataFrame(
-        np.stack([self[name_1], self[name_2]], axis=1),
-        columns=[name_1, name_2],
-    ).groupby([name_2, name_1]).size().unstack()
+        np.stack([self[column_name_1], self[column_name_2]], axis=1),
+        columns=[column_name_1, column_name_2],
+    ).groupby([column_name_2, column_name_1]).size().unstack()
     df_stat.rename(index=dict(enumerate(category_names_2)),
                    columns=dict(enumerate(category_names_1)),
                    inplace=True)
@@ -176,15 +216,40 @@ class Dataset:
       df_stat /= df_stat.sum().sum()
     return df_stat
 
-  def preprocess_tabular(self, name, train_split_name=None) -> None:
-    x = self[name]
-    assert isinstance(x, pd.DataFrame)
-    self.X[name] = pd.get_dummies(x)
-
+  def preprocess_tabular(self,
+                         column_name,
+                         train_split_name=None,
+                         inplace=True) -> None:
+    x = self[column_name]
+    assert isinstance(x, (pd.DataFrame, np.ndarray))
+    self.data[column_name] = pd.get_dummies(x)
     if train_split_name is None:
-      x_train = self[name]
+      x_train = self[column_name]
     else:
-      x_train = self.get_split(train_split_name)[name]
+      x_train = self.split[train_split_name][column_name]
     scaler = StandardScaler().fit(x_train)
-    self.X[name] = scaler.transform(self[name])
-    self.features[name] = Array()
+    y = scaler.transform(self[column_name])
+    if inplace:
+      self.data[column_name] = y
+      self.features[column_name] = Array()
+    return y
+
+  def __repr__(self):
+    s = f'Dataset of length {len(self)} containing:\n'
+    for column_name, feature in self.features.items():
+      if isinstance(feature, Categorical):
+        s += f'  - {column_name} ({feature.n_categories} categories)\n'
+      else:
+        if isinstance(self.data[column_name], pd.DataFrame):
+          s += f'  - {column_name} (DataFrame), shape: {self.data[column_name].shape}\n'
+        elif isinstance(self.data[column_name], np.ndarray):
+          s += f'  - {column_name} (ndarray), shape: {self.data[column_name].shape}\n'
+        elif isinstance(self.data[column_name], Tensor):
+          s += f'  - {column_name} (tensor), shape: {self.data[column_name].shape}\n'
+        elif isinstance(self.data[column_name], list):
+          s += f'  - {column_name} (list)\n'
+    if self.split_idx:
+      s += 'Splits:\n'
+      for split_name, idx in self.split_idx.items():
+        s += f'  - {split_name}, length: {len(idx)}\n'
+    return s.strip()

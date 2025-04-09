@@ -4,7 +4,6 @@ sys.path.append('..')
 
 import argparse
 import os
-import pickle
 
 import torch
 import numpy as np
@@ -82,7 +81,7 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
         category_names['RAC1P'][str(int(n))] for n in group_names
     ]
 
-  D = Dataset.from_loader_outputs(loader_outputs)
+  D = loader.dataset_from_loader_outputs(loader_outputs)
   D.create_splits(
       split_sizes,
       ['pre', 'post', 'val', 'test'],
@@ -140,13 +139,13 @@ def main():
     for model in models:
       for criterion in criteria:
         print(
-            f"Working on {dataset_name} with {model} for {criterion} ({'aware' if aware else 'blind'})"
+            f"Working on {dataset_name} ({'aware' if aware else 'blind'}) for {criterion} with {model}"
         )
 
         cache_fname = f"{dataset_name}_{'aware' if aware else 'blind'}_{model}.pickle"
         cache_path = os.path.join(cache_dir, cache_fname)
         if os.path.exists(cache_path):
-          D_post = pickle.load(open(cache_path, 'rb'))
+          D_post = Dataset.from_path(cache_path)
           n_classes = D_post.features['labels'].n_categories
           n_groups = D_post.features['groups'].n_categories
           print(f"Loaded cached dataset from {cache_path}")
@@ -163,11 +162,11 @@ def main():
           D['labels_ay'] = D['groups'] * n_classes + D['labels']
 
           # Drop pretrain split from dataset
-          D_post = Dataset.from_splits(D.get_splits(['post', 'val', 'test']))
+          D_post = D.split[['post', 'val', 'test']]
 
           if aware:
             # Train Pr[ Y | X ] predictor
-            predictor.fit(D.get_split('pre')['X'], D.get_split('pre')['labels'])
+            predictor.fit(D.split['pre']['X'], D.split['pre']['labels'])
             D_post['p_y_x'] = predictor.predict_proba(D_post['X'])
             D_post['p_a_x'] = np.eye(n_groups)[D_post['groups']]
             D_post['p_ay_x'] = (D_post['p_a_x'][:, :, None] *
@@ -175,18 +174,15 @@ def main():
                                     -1, n_groups * n_classes)
           else:
             # Train Pr[ A, Y | X ] predictor
-            predictor.fit(
-                D.get_split('pre')['X'],
-                D.get_split('pre')['labels_ay'])
+            predictor.fit(D.split['pre']['X'], D.split['pre']['labels_ay'])
             D_post['p_ay_x'] = predictor.predict_proba(D_post['X'])
             D_post['p_a_x'] = D_post['p_ay_x'].reshape(-1, n_groups,
                                                        n_classes).sum(axis=2)
             D_post['p_y_x'] = D_post['p_ay_x'].reshape(-1, n_groups,
                                                        n_classes).sum(axis=1)
 
-          with open(cache_path, 'wb') as f:
-            pickle.dump(D_post, f)
-            print(f"Cached dataset to {cache_path}")
+          D_post.to_path(cache_path)
+          print(f"Cached dataset to {cache_path}")
 
         result_fname = f"{{split}}_linearpost_{dataset_name}_{'aware' if aware else 'blind'}_{model}_{criterion}.csv"
         result_path = os.path.join(results_dir, result_fname)
@@ -199,11 +195,11 @@ def main():
               random_state=seed,
           )
 
-        preds_val = D_post.get_split('val')['p_y_x'].argmax(axis=1)
+        preds_val = D_post.split['val']['p_y_x'].argmax(axis=1)
         metrics_baseline = metrics.evaluate(
-            D_post.get_split('val')['labels'],
+            D_post.split['val']['labels'],
             preds_val,
-            D_post.get_split('val')['groups'],
+            D_post.split['val']['groups'],
             n_classes=n_classes,
             n_groups=n_groups,
         )
@@ -222,31 +218,31 @@ def main():
               fairness_criterion=criterion,
               alpha=alpha,
               seed=seed,
-          ).fit(p_a_x=D_post.get_split('post')['p_a_x'],
-                p_y_x=D_post.get_split('post')['p_y_x'],
-                p_ay_x=D_post.get_split('post')['p_ay_x'],
+          ).fit(p_a_x=D_post.split['post']['p_a_x'],
+                p_y_x=D_post.split['post']['p_y_x'],
+                p_ay_x=D_post.split['post']['p_ay_x'],
                 solver=solver,
                 solve_primal=True)
 
           fair_preds_val = postprocessor.predict(
-              p_a_x=D_post.get_split('val')['p_a_x'],
-              p_y_x=D_post.get_split('val')['p_y_x'],
-              p_ay_x=D_post.get_split('val')['p_ay_x'])
+              p_a_x=D_post.split['val']['p_a_x'],
+              p_y_x=D_post.split['val']['p_y_x'],
+              p_ay_x=D_post.split['val']['p_ay_x'])
           fair_preds_test = postprocessor.predict(
-              p_a_x=D_post.get_split('test')['p_a_x'],
-              p_y_x=D_post.get_split('test')['p_y_x'],
-              p_ay_x=D_post.get_split('test')['p_ay_x'])
+              p_a_x=D_post.split['test']['p_a_x'],
+              p_y_x=D_post.split['test']['p_y_x'],
+              p_ay_x=D_post.split['test']['p_ay_x'])
 
           for split, preds in zip(['val', 'test'],
                                   [fair_preds_val, fair_preds_test]):
             loggers[split].log_evaluate(
-                D_post.get_split(split)['labels'],
+                D_post.split[split]['labels'],
                 preds,
-                D_post.get_split(split)['groups'],
+                D_post.split[split]['groups'],
                 alpha=alpha,
                 seed=seed,
             )
-            loggers[split].to_csv(result_path.format(split=split))
+            loggers[split].to_path(result_path.format(split=split))
 
 
 def parse_args():

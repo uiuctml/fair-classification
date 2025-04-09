@@ -2,6 +2,7 @@ accelerate
 cvxpy
 datasets
 folktables
+gurobipy
 matplotlib
 numpy
 pandas
