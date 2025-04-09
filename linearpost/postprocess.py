@@ -1,5 +1,5 @@
 from typing import Any, Optional, Literal
-from itertools import product
+from itertools import combinations, product
 
 import numpy as np
 import cvxpy as cp
@@ -315,3 +315,76 @@ class LinearPostSimple:
 
     risk = np.sum(p_y_x[..., None] * self.cls_loss_fn[None, :], axis=1)
     return {'probas_group': p_g_x, 'risk': risk}
+
+
+class LinearPostOverlapping(LinearPostSimple):
+  # p_s_x.shape = [n_examples, 2**n_groups_overlap]
+  # p_sy_x.shape = [n_examples, 2**n_groups_overlap, n_classes]
+
+  # For example, if n_groups_overlap is 5 (overlapping), then
+  # s = 0b11101
+  # means that the example belongs to groups 0, 1, 2, and 4 (0-indexed)
+
+  # The group s = 0 is not protected and ignored
+
+  def __init__(
+      self,
+      n_classes: int,
+      n_groups: int,  # number of overlapping groups
+      ways: list[int] | Literal['all'] = [1],
+      fairness_criterion: Literal['sp', 'tpr', 'fpr', 'eo'] = 'sp',
+      remove_unused: bool = False,
+      class_weight: Optional[list[float]] = None,
+      alpha: Optional[float] = None,
+      noise: float = 1e-4,
+      seed: Optional[int] = None) -> None:
+    self.n_groups_overlap = n_groups_overlap = n_groups
+    self.ways = list(range(1, n_groups_overlap + 1)) if ways == 'all' else ways
+    super().__init__(
+        n_classes=n_classes,
+        n_groups=self.get_n_subgroups_(n_groups_overlap, self.ways),
+        fairness_criterion=fairness_criterion,
+        remove_unused=remove_unused,
+        class_weight=class_weight,
+        alpha=alpha,
+        noise=noise,
+        seed=seed,
+    )
+
+  @staticmethod
+  def get_n_subgroups_(n_groups: int, ways: list[int]) -> int:
+    return sum(1 for k in ways for _ in combinations(range(1, n_groups), k))
+
+  @staticmethod
+  def get_idx_containing_groups_(groups: list[int],
+                                 n_groups_overlap: int) -> list[int]:
+    subgroup_enc = sum((1 << (s - 1)) for s in groups)
+    contains_s = lambda i: (i & subgroup_enc) == subgroup_enc
+    return [i for i in range(2**n_groups_overlap) if contains_s(i)]
+
+  def get_risk_and_group_probas_(self,
+                                 p_a_x: Optional[np.ndarray] = None,
+                                 p_y_x: Optional[np.ndarray] = None,
+                                 p_ay_x: Optional[np.ndarray] = None):
+    if p_y_x is None:
+      assert p_ay_x is not None, 'p_y_x or p_ay_x must be provided'
+      p_y_x = p_ay_x.reshape(-1, 2**self.n_groups_overlap,
+                             self.n_classes).sum(axis=1)
+    if p_a_x is not None:
+      p_s_x = []
+      for g in (g for k in self.ways
+                for g in combinations(range(1, self.n_groups_overlap), k)):
+        i = self.get_idx_containing_groups_(g, self.n_groups_overlap)
+        p_s_x.append(p_a_x[:, i].sum(axis=1))
+      p_a_x = np.stack(p_s_x, axis=1)  # overwrite p_a_x
+    if p_ay_x is not None:
+      p_ay_x = p_ay_x.reshape(-1, 2**self.n_groups_overlap, self.n_classes)
+      p_sy_x = []
+      for g in (g for k in self.ways
+                for g in combinations(range(1, self.n_groups_overlap), k)):
+        i = self.get_idx_containing_groups_(g, self.n_groups_overlap)
+        p_sy_x.append(p_ay_x[:, i].sum(axis=1))
+      p_ay_x = np.stack(p_sy_x, axis=1)  # overwrite p_ay_x
+    return super().get_risk_and_group_probas_(p_a_x=p_a_x,
+                                              p_y_x=p_y_x,
+                                              p_ay_x=p_ay_x)

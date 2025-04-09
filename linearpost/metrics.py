@@ -1,5 +1,6 @@
 from functools import partial
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, Literal
+from itertools import combinations
 import os
 import warnings
 
@@ -260,16 +261,81 @@ def evaluate(y_true: Optional[np.ndarray] = None,
   return metrics
 
 
+def evaluate_overlapping(y_true,
+                         y_preds,
+                         groups,
+                         n_classes: Optional[int] = None,
+                         n_groups_overlap: Optional[int] = None,
+                         ways: list[int] | Literal['all'] = [1],
+                         return_std_err: bool = False,
+                         fairness_only: bool = False,
+                         n_resamples: int = 1000,
+                         random_state: Optional[int] = None):
+  metrics = {}
+  if not fairness_only:
+    # get performance metrics
+    metrics = evaluate(y_true,
+                       y_preds,
+                       n_classes=n_classes,
+                       return_std_err=return_std_err,
+                       n_resamples=n_resamples,
+                       random_state=random_state)
+
+  # group s = 0 is not protected and will be ignored
+  n_groups_overlap = groups.shape[1]
+  ways_name = ('all_ways' if ways == 'all' else ','.join(map(str, ways)) +
+               '-ways')
+  ways = list(range(1, n_groups_overlap + 1)) if ways == 'all' else ways
+  subgroups_enc = (groups * 2**np.arange(n_groups_overlap)).sum(axis=1)
+
+  y_true_all = []
+  y_preds_all = []
+  subgroups_all = []
+  for gs in (
+      g for k in ways for g in combinations(range(1, n_groups_overlap), k)):
+    subgroup_enc = sum((1 << (s - 1)) for s in gs)
+    mask = (subgroups_enc & subgroup_enc) == subgroup_enc
+    y_true_all.append(y_true[mask])
+    y_preds_all.append(y_preds[mask])
+    subgroups_all.append(np.ones_like(y_true[mask]) * len(subgroups_all))
+  y_true_all = np.concatenate(y_true_all)
+  y_preds_all = np.concatenate(y_preds_all)
+  subgroups_all = np.concatenate(subgroups_all)
+
+  # get fairness metrics
+  metrics_fairness = {
+      ways_name + '_' + k: v
+      for k, v in evaluate(y_true_all,
+                           y_preds_all,
+                           groups=subgroups_all,
+                           n_classes=n_classes,
+                           return_std_err=return_std_err,
+                           fairness_only=True,
+                           n_resamples=n_resamples,
+                           random_state=random_state).items()
+  }
+
+  # fix weighted disparity metrics
+  inflation_ratio = len(y_true_all) / len(y_true)
+  for k in metrics_fairness:
+    if k.endswith('_weighted'):
+      metrics_fairness[k] = list(metrics_fairness[k])
+      metrics_fairness[k][0] /= inflation_ratio
+  return {**metrics, **metrics_fairness}
+
+
 class MetricLogger:
 
   def __init__(self,
                n_classes: int,
                n_groups: Optional[int] = None,
+               ways: Optional[list[int] | Literal['all']] = [1],
                return_std_err: bool = False,
                n_resamples: int = 1000,
                random_state: Optional[int] = None):
     self.n_classes = n_classes
     self.n_groups = n_groups
+    self.ways = ways
     self.return_std_err = return_std_err
     self.n_resamples = n_resamples
     self.random_state = random_state
@@ -297,15 +363,17 @@ class MetricLogger:
 
   def log_evaluate(self, y_true, y_preds, groups=None, **kwargs):
     metrics = {k: v if isinstance(v, tuple) else (v,) for k, v in kwargs.items()}
+    evaluate_fn = (partial(evaluate_overlapping, ways=self.ways)
+                   if groups is not None and groups.ndim > 1 else evaluate)
     metrics.update(
-        evaluate(y_true,
-                 y_preds,
-                 groups,
-                 self.n_classes,
-                 self.n_groups,
-                 return_std_err=self.return_std_err,
-                 n_resamples=self.n_resamples,
-                 random_state=self.random_state))
+        evaluate_fn(y_true,
+                    y_preds,
+                    groups,
+                    self.n_classes,
+                    self.n_groups,
+                    return_std_err=self.return_std_err,
+                    n_resamples=self.n_resamples,
+                    random_state=self.random_state))
     self.log(metrics)
     return metrics
 
