@@ -1,0 +1,140 @@
+{
+  "adult": {
+    "column_names": {
+      "age": "Age",
+      "workclass": "Class of worker",
+      "education": "Educational attainment",
+      "education-num": "Education level (numeric)",
+      "marital-status": "Marital status",
+      "occupation": "Occupation",
+      "relationship": "Relationship",
+      "race": "Race",
+      "sex": "Sex",
+      "capital-gain": "Capital gain in the previous year",
+      "capital-loss": "Capital loss in the previous year",
+      "hours-per-week": "Hours worked per week",
+      "native-country": "Country of origin"
+    },
+    "category_names": {
+      "workclass": {
+        "Private": "Employee of a private for-profit company or business, or of an individual, for wages, salary, or commissions",
+        "Self-emp-not-inc": "Self-employed in own not incorporated business, professional practice, or farm",
+        "Self-emp-inc": "Self-employed in own incorporated business, professional practice or farm",
+        "Federal-gov": "Federal government employee",
+        "Local-gov": "Local government employee (city, county, etc.)",
+        "State-gov": "State government employee",
+        "Without-pay": "Working without pay in family business or farm",
+        "Never-worked": "Unemployed and last worked 5 years ago or earlier or never worked"
+      },
+      "education": {
+        "Bachelors": "Bachelor's degree",
+        "Some-college": "Some college, but no degree",
+        "11th": "Grade 11",
+        "HS-grad": "Regular high school diploma",
+        "Prof-school": "Professional degree beyond a bachelor's degree",
+        "Assoc-acdm": "Associate's degree (academic program)",
+        "Assoc-voc": "Associate's degree (vocational or technical program)",
+        "9th": "Grade 9",
+        "7th-8th": "Grade 7 or Grade 8",
+        "12th": "12th grade - no diploma",
+        "Masters": "Master's degree",
+        "1st-4th": "Grade 1, Grade 2, Grade 3, or Grade 4",
+        "10th": "Grade 10",
+        "Doctorate": "Doctorate degree",
+        "5th-6th": "Grade 5 or Grade 6",
+        "Preschool": "Nursery school, preschool"
+      },
+      "marital-status": {
+        "Married-civ-spouse": "Married",
+        "Divorced": "Divorced",
+        "Never-married": "Never married or under 15 years old",
+        "Separated": "Separated",
+        "Widowed": "Widowed",
+        "Married-spouse-absent": "Separated or spouse absent",
+        "Married-AF-spouse": "Married (armed forces spouse)"
+      },
+      "occupation": {
+        "Tech-support": "Computer support and tech specialists",
+        "Craft-repair": "Mechanics, installers, and repairers",
+        "Other-service": "Personal and other service workers",
+        "Sales": "Sales occupations",
+        "Exec-managerial": "Executives and managers",
+        "Prof-specialty": "Professionals (science, education, medical, engineering)",
+        "Handlers-cleaners": "Laborers, handlers, and cleaners",
+        "Machine-op-inspct": "Machine operators and inspectors",
+        "Adm-clerical": "Administrative support and clerical workers",
+        "Farming-fishing": "Farming, fishing, and forestry",
+        "Transport-moving": "Transportation and material moving",
+        "Priv-house-serv": "Private household workers",
+        "Protective-serv": "Protective service occupations",
+        "Armed-Forces": "Military occupations"
+      },
+      "relationship": {
+        "Wife": "Wife",
+        "Own-child": "Biological, adopted, or step son/daughter",
+        "Husband": "Husband",
+        "Not-in-family": "Other nonrelative",
+        "Other-relative": "Other relative",
+        "Unmarried": "Unmarried partner"
+      },
+      "native-country": {
+        "United-States": "United States",
+        "Cambodia": "Cambodia",
+        "England": "England",
+        "Puerto-Rico": "Puerto Rico",
+        "Canada": "Canada",
+        "Germany": "Germany",
+        "Outlying-US(Guam-USVI-etc)": "US Island Areas or Territories (e.g., Guam, USVI)",
+        "India": "India",
+        "Japan": "Japan",
+        "Greece": "Greece",
+        "South": "South Korea",
+        "China": "China",
+        "Cuba": "Cuba",
+        "Iran": "Iran",
+        "Honduras": "Honduras",
+        "Philippines": "Philippines",
+        "Italy": "Italy",
+        "Poland": "Poland",
+        "Jamaica": "Jamaica",
+        "Vietnam": "Vietnam",
+        "Mexico": "Mexico",
+        "Portugal": "Portugal",
+        "Ireland": "Ireland",
+        "France": "France",
+        "Dominican-Republic": "Dominican Republic",
+        "Laos": "Laos",
+        "Ecuador": "Ecuador",
+        "Taiwan": "Taiwan",
+        "Haiti": "Haiti",
+        "Columbia": "Colombia",
+        "Hungary": "Hungary",
+        "Guatemala": "Guatemala",
+        "Nicaragua": "Nicaragua",
+        "Scotland": "Scotland",
+        "Thailand": "Thailand",
+        "Yugoslavia": "Yugoslavia",
+        "El-Salvador": "El Salvador",
+        "Trinadad&Tobago": "Trinidad & Tobago",
+        "Peru": "Peru",
+        "Hong": "Hong Kong",
+        "Holand-Netherlands": "Netherlands"
+      }
+    }
+  },
+  "compas": {
+    "column_names": {
+      "age": "Age at the time of survey",
+      "c_charge_degree": "Charge degree",
+      "c_charge_desc": "Charge description",
+      "priors_count": "Number of prior convictions",
+      "length_of_stay": "Length of stay in jail"
+    },
+    "category_names": {
+      "c_charge_degree": {
+        "F": "Felony",
+        "M": "Misdemeanor"
+      }
+    }
+  }
+}

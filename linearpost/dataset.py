@@ -30,8 +30,8 @@ class Multilabel(Feature):
 
 @dataclass(kw_only=True)
 class Array(Feature):
-  column_names: Optional[list[str]] = None
-  category_names: Optional[list[str]] = None
+  column_names: Optional[dict[str, str]] = None
+  category_names: Optional[dict[str, dict[str, str]]] = None
 
 
 class Dataset:
@@ -209,7 +209,7 @@ class Dataset:
   def preprocess_tabular(self,
                          column_name,
                          train_split_name=None,
-                         inplace=True) -> None:
+                         inplace=False) -> None | np.ndarray:
     x = self[column_name]
     assert isinstance(x, (pd.DataFrame, np.ndarray))
     self.data[column_name] = pd.get_dummies(x)
@@ -222,7 +222,46 @@ class Dataset:
     if inplace:
       self.data[column_name] = y
       self.features[column_name] = Array()
-    return y
+    else:
+      return y
+
+  def natural_language_serialize_tabular(self,
+                                         column_name,
+                                         use_natural_language_names=True,
+                                         keep_nan_entries=False,
+                                         inplace=False,
+                                         str_na='N/A',
+                                         sep_kv=': ',
+                                         sep_items='\n') -> None | list[str]:
+    x = self[column_name]
+    f = self.features[column_name]
+    assert isinstance(f, Array)
+    y = []
+    if len(x):
+      old_column_names = column_names = x.columns if isinstance(
+          x, pd.DataFrame) else np.arange(len(x[0]))
+      category_names = {}
+      if use_natural_language_names:
+        assert f.column_names is not None and f.category_names is not None
+        old_column_names = column_names
+        column_names = [f.column_names[n] for n in old_column_names]
+        category_names = f.category_names
+
+      iterator = x.itertuples(index=False) if isinstance(x, pd.DataFrame) else x
+      for row in iterator:
+        kv_pairs = []
+        for old_n, n, v in zip(old_column_names, column_names, row):
+          if keep_nan_entries or pd.notna(v):
+            v = category_names.get(old_n, {}).get(v, str(v))
+            if not pd.notna(v):
+              v = str_na
+            kv_pairs.append(f'{n}{sep_kv}{v}')
+        y.append(sep_items.join(kv_pairs))
+    if inplace:
+      self.data[column_name] = y
+      self.features[column_name] = Array()
+    else:
+      return y
 
   def __repr__(self):
     s = f'Dataset of length {len(self)} containing:\n'

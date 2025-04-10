@@ -91,7 +91,7 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
   if remove_sensitive_attr:
     D['X'].drop([sensitive_attr], inplace=True, axis=1)
   print('Dataset columns:', D['X'].columns.tolist())
-  D.preprocess_tabular('X', train_split_name='pre')
+  D.preprocess_tabular('X', train_split_name='pre', inplace=True)
   return D
 
 

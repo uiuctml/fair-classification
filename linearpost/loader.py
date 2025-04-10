@@ -1,6 +1,6 @@
 '''
 For tabular datasets, it is important to "Mark categorical columns" in order for
-dataset.Dataset.preprocess_tabular to one-hot encode them.
+dataset.Dataset.preprocess_tabular to recognize and one-hot encode them.
 '''
 
 import csv
@@ -8,6 +8,8 @@ import os
 import pickle
 import urllib.request
 import zipfile
+import json
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -75,6 +77,19 @@ def group_label_statistics(dataset: Dataset,
   return df_stat
 
 
+def get_column_and_category_names(dataset_name, column_names):
+  old_column_names = column_names
+  with open(
+      os.path.join(
+          Path(__file__).parent, 'natural_language_category_names.json'),
+      'r') as f:
+    meta = json.load(f)
+    col_name_map = meta[dataset_name]['column_names']
+    column_names = {n: col_name_map.get(n, n) for n in old_column_names}
+    category_names = meta[dataset_name]['category_names']
+  return column_names, category_names
+
+
 def adult(data_dir, sensitive_attr='sex'):
   if isinstance(sensitive_attr, str):
     sensitive_attr = [sensitive_attr]
@@ -137,6 +152,12 @@ def adult(data_dir, sensitive_attr='sex'):
   df[categotical_columns] = df[categotical_columns].apply(
       lambda x: x.astype('category'))
 
+  # load natural language column and category names
+  # based on https://www2.census.gov/programs-surveys/acs/tech_docs/pums/data_dict/PUMS_Data_Dictionary_2018.csv
+  # generated with chatgpt assistance
+  column_names, category_names = get_column_and_category_names(
+      'adult', df.columns)
+
   return {
       'data': df,
       'labels': labels,
@@ -144,7 +165,7 @@ def adult(data_dir, sensitive_attr='sex'):
       'label_names': label_names,
       'group_names': group_names,
       'column_names': column_names,
-      # 'category_names': category_names
+      'category_names': category_names,
       'splits': {
           'train': df_train.shape[0],
           'test': df_test.shape[0]
@@ -183,6 +204,7 @@ def acsincome(data_dir, n_classes=2, sensitive_attr='SEX'):
           k = row[-2].lstrip('0')
           if k == '':
             k = '0'
+          k = int(k) if not 'b' in k else -1
           category_names[row[1]][k] = row[-1]
 
   # Download data via folktables
@@ -199,9 +221,12 @@ def acsincome(data_dir, n_classes=2, sensitive_attr='SEX'):
       group=sensitive_attr,
       postprocess=lambda x: np.nan_to_num(x, nan=-1)).df_to_pandas(df_raw)
 
+  # df only contains integer-like values
+  df = df.astype(int)
+
   groups = groups.values.flatten()
   group_names, groups = np.unique(groups, return_inverse=True)
-  group_names = [category_names[sensitive_attr][str(n)] for n in group_names]
+  group_names = [category_names[sensitive_attr][v] for v in group_names]
 
   targets = targets.values.flatten()
   if n_classes == 2:
@@ -310,14 +335,19 @@ def compas(data_dir, sensitive_attr='race', keep_textual_features=False):
   df[categotical_columns] = df[categotical_columns].apply(
       lambda x: x.astype('category'))
 
+  # load natural language column and category names
+  # based on https://cig.fi.upm.es/wp-content/uploads/TFM_STEPHAN_WOLTERS.pdf
+  column_names, category_names = get_column_and_category_names(
+      'compas', df.columns)
+
   return {
       'data': df,
       'labels': labels,
       'groups': groups,
       'label_names': label_names,
       'group_names': group_names,
-      # 'column_names': column_names,
-      # 'category_names': category_names
+      'column_names': column_names,
+      'category_names': category_names
   }
 
 
