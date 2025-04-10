@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Sequence, Callable
+from typing import Optional, Sequence, Callable, TypeAlias
 import pickle
 
 import numpy as np
@@ -8,7 +8,7 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader
 from torch import Tensor
 
-DataType = pd.DataFrame | np.ndarray | Tensor | list
+DataType: TypeAlias = pd.DataFrame | np.ndarray | Tensor | list
 
 
 @dataclass(kw_only=True)
@@ -18,7 +18,7 @@ class Feature:
 
 @dataclass(kw_only=True)
 class Categorical(Feature):
-  n_categories: Optional[int] = -1
+  n_categories: Optional[int] = None
   category_names: Optional[list[str]] = None
 
 
@@ -134,7 +134,7 @@ class Dataset:
       return dataset
 
     def get_splits(self, split_names: Sequence[str]) -> 'Dataset':
-      all_idx = []
+      all_idx: list[Sequence[int]] = []
       new_split_idx = {}
       for split_name in split_names:
         s = sum(len(I) for I in all_idx)
@@ -200,27 +200,6 @@ class Dataset:
                       collate_fn=collate_fn,
                       shuffle=shuffle)
 
-  def statistics_categorical_joint(self,
-                                   column_name_1: str,
-                                   column_name_2: str,
-                                   normalize: bool = False) -> pd.DataFrame:
-    f1, f2 = self.features[column_name_1], self.features[column_name_2]
-    assert isinstance(f1, Categorical) and isinstance(f2, Categorical)
-    category_names_1 = (f1.category_names if f1.category_names is not None else
-                        np.arange(f1.n_categories).astype(str).tolist())
-    category_names_2 = (f2.category_names if f2.category_names is not None else
-                        np.arange(f2.n_categories).astype(str).tolist())
-    df_stat = pd.DataFrame(
-        np.stack([self[column_name_1], self[column_name_2]], axis=1),
-        columns=[column_name_1, column_name_2],
-    ).groupby([column_name_2, column_name_1]).size().unstack()
-    df_stat.rename(index=dict(enumerate(category_names_2)),
-                   columns=dict(enumerate(category_names_1)),
-                   inplace=True)
-    if normalize:
-      df_stat /= df_stat.sum().sum()
-    return df_stat
-
   def preprocess_tabular(self,
                          column_name,
                          train_split_name=None,
@@ -246,7 +225,7 @@ class Dataset:
         s += f'  - {column_name} ({feature.n_categories} categories)\n'
       else:
         if isinstance(self.data[column_name], pd.DataFrame):
-          s += f'  - {column_name} (DataFrame), shape: {self.data[column_name].shape}\n'
+          s += f'  - {column_name} ({feature.n_categories or "?"} categories)\n'
         elif isinstance(self.data[column_name], np.ndarray):
           s += f'  - {column_name} (ndarray), shape: {self.data[column_name].shape}\n'
         elif isinstance(self.data[column_name], Tensor):
