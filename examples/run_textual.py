@@ -176,7 +176,7 @@ def main():
 
         # Train Pr[ A, Y | X ] predictor
         dataloader_train = D.split['pre'].to_dataloader(
-            columns=(['labels_ay'] + list(X_tokenized[0].keys())),
+            column_names=(['labels_ay'] + list(X_tokenized[0].keys())),
             batch_size=batch_size,
             collate_fn=data_collator)
         fit(model,
@@ -192,7 +192,7 @@ def main():
         D_post = D.split[['post', 'val', 'test']]
 
         dataloader_cache = D_post.to_dataloader(
-            columns=list(X_tokenized[0].keys()),
+            column_names=list(X_tokenized[0].keys()),
             batch_size=batch_size,
             collate_fn=data_collator,
         )
