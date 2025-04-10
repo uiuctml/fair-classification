@@ -222,10 +222,10 @@ class Dataset:
     s = f'Dataset of length {len(self)} containing:\n'
     for column_name, feature in self.features.items():
       if isinstance(feature, Categorical):
-        s += f'  - {column_name} ({feature.n_categories} categories)\n'
+        s += f'  - {column_name} ({feature.n_categories or "?"} categories)\n'
       else:
         if isinstance(self.data[column_name], pd.DataFrame):
-          s += f'  - {column_name} ({feature.n_categories or "?"} categories)\n'
+          s += f'  - {column_name} (DataFrame), shape: {self.data[column_name].shape}\n'
         elif isinstance(self.data[column_name], np.ndarray):
           s += f'  - {column_name} (ndarray), shape: {self.data[column_name].shape}\n'
         elif isinstance(self.data[column_name], Tensor):
