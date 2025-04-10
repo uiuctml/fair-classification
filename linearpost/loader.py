@@ -17,6 +17,9 @@ from .dataset import Dataset, Array, Categorical
 
 
 def dataset_from_loader_outputs(outputs) -> Dataset:
+  # data will be treated as input X
+  # labels: ndarray will be treated as class labels
+  # groups: ndarray will be treated as sensitive attribute
   data = {'X': outputs['data'], 'labels': outputs['labels']}
   features = {
       'X':
@@ -33,11 +36,28 @@ def dataset_from_loader_outputs(outputs) -> Dataset:
     features['groups'] = Categorical(n_categories=len(outputs['group_names']),
                                      category_names=outputs['group_names'])
   dataset = Dataset(data=data, features=features)
-  if 'splits' in outputs:
+  if 'split_idx' in outputs:
+    dataset.split_idx = outputs['split_idx']
+  elif 'splits' in outputs:
     dataset.create_splits(split_sizes=list(outputs['splits'].values()),
                           split_names=list(outputs['splits'].keys()))
   dataset.create_index()
   return dataset
+
+
+def group_label_statistics(dataset: Dataset,
+                           normalize: bool = False) -> pd.DataFrame:
+  df_stat = pd.DataFrame(
+      np.stack([dataset['groups'], dataset['labels']], axis=1),
+      columns=['groups', 'labels'],
+  ).groupby(['labels', 'groups']).size().unstack()
+  df_stat.rename(
+      index=dict(enumerate(dataset.features['labels'].category_names)),
+      columns=dict(enumerate(dataset.features['groups'].category_names)),
+      inplace=True)
+  if normalize:
+    df_stat /= len(dataset)
+  return df_stat
 
 
 def adult(data_dir, sensitive_attr='sex'):
@@ -203,7 +223,7 @@ def acsincome(data_dir, n_classes=2, sensitive_attr='SEX'):
   }
 
 
-def compas(data_dir, sensitive_attr='sex', keep_textual_features=False):
+def compas(data_dir, sensitive_attr='race', keep_textual_features=False):
   if isinstance(sensitive_attr, str):
     sensitive_attr = [sensitive_attr]
 
