@@ -169,18 +169,23 @@ class Dataset:
       split_idx = np.cumsum([s * len(self) for s in split_sizes]).astype(int)
     else:
       split_idx = np.cumsum(split_sizes)
-    idxs = np.split(idx, split_idx[:-1])
+    idxs = np.split(idx, split_idx)[:-1]
     self.split_idx = dict(zip(split_names, idxs))
 
   def to_path(self, path: str) -> None:
     with open(path, 'wb') as f:
-      pickle.dump(self, f)
+      pickle.dump(
+          {
+              'data': self.data,
+              'features': self.features,
+              'split_idx': self.split_idx
+          }, f)
 
   @classmethod
   def from_path(cls, path: str) -> 'Dataset':
     with open(path, 'rb') as f:
-      d_ = pickle.load(f)
-    return cls(d_.data, d_.features, d_.split_idx)
+      d = pickle.load(f)
+    return cls(**d)
 
   def to_dataloader(self,
                     column_names: Optional[Sequence[str]] = None,
