@@ -263,14 +263,15 @@ class LinearPostSimple:
       fairness_constraints = [
           (y_c, np.arange(n_groups)) for y_c in range(n_classes)
       ]
-    elif fairness_criterion == 'fpr' and n_classes == 2:
+    elif fairness_criterion == 'fpr':
+      assert n_classes == 2
       # groups passed to LinearPost are joint (A, Y)
       if not remove_unused:
         fairness_constraints = [(1, n_classes * np.arange(n_groups) + 0)]
       else:
         fairness_constraints = [(1, np.arange(n_groups))]
     else:
-      if n_classes == 2 and fairness_criterion == 'tpr':
+      if fairness_criterion == 'tpr' and n_classes == 2:
         # groups passed to LinearPost are joint (A, Y)
         if not remove_unused:
           fairness_constraints = [(1, n_classes * np.arange(n_groups) + 1)]
@@ -306,7 +307,7 @@ class LinearPostSimple:
         p_y_x = p_ay_x.reshape(-1, self.n_groups, self.n_classes).sum(axis=1)
       p_g_x = p_ay_x.reshape(-1, self.n_groups * self.n_classes)
 
-    if self.remove_unused and self.n_groups == 2:
+    if self.remove_unused and self.n_classes == 2:
       if self.fairness_criterion == 'tpr':
         p_g_x = p_g_x.reshape(-1, self.n_groups, self.n_classes)[:, :, 1]
         # p_g_x.shape = (n_examples, n_groups)
