@@ -292,7 +292,7 @@ def evaluate_overlapping(y_true,
   y_preds_all = []
   subgroups_all = []
   for gs in (
-      g for k in ways for g in combinations(range(1, n_groups_overlap), k)):
+      g for k in ways for g in combinations(range(1, n_groups_overlap + 1), k)):
     subgroup_enc = sum((1 << (s - 1)) for s in gs)
     mask = (subgroups_enc & subgroup_enc) == subgroup_enc
     y_true_all.append(y_true[mask])
@@ -321,6 +321,7 @@ def evaluate_overlapping(y_true,
     if k.endswith('_weighted'):
       metrics_fairness[k] = list(metrics_fairness[k])
       metrics_fairness[k][0] *= inflation_ratio
+      # may be greater than 1, because groups are overlapping
   return {**metrics, **metrics_fairness}
 
 
