@@ -57,20 +57,21 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
     )
     split_sizes = [0.5, 0.1, 0.1, 0.3]
 
-    # Combine RAC1P categories 3, 4, 5, and 6, 7, and 8, 9 into new categories
-    # 10, 11, and 12 respectively, due to small sample size in some groups.
+    # Combine RAC1P categories [3, 4, 5], [6, 7], and [8, 9] into new categories
+    # 9997, 9998, and 9999 resp., due to small sample size in some groups.
     # This is also consistent with the UCI Adult dataset.
     category_names = loader_outputs['category_names']
-    category_names['RAC1P']['9997'] = "American Indian or Alaska Native alone"
-    category_names['RAC1P'][
-        '9998'] = "Asian, Native Hawaiian or Other Pacific Islander alone"
-    category_names['RAC1P']['9999'] = "Other"
+    category_names['RAC1P'].update({
+        9997: "American Indian or Alaska Native alone",
+        9998: "Asian, Native Hawaiian or Other Pacific Islander alone",
+        9999: "Other"
+    })
 
     df = loader_outputs['data']
-    df['RAC1P'] = df['RAC1P'].astype(float)
-    df['RAC1P'] = df['RAC1P'].replace([3.0, 4.0, 5.0], 9997.0)
-    df['RAC1P'] = df['RAC1P'].replace([6.0, 7.0], 9998.0)
-    df['RAC1P'] = df['RAC1P'].replace([8.0, 9.0], 9999.0)
+    df['RAC1P'] = df['RAC1P'].astype(df['RAC1P'].to_numpy().dtype)
+    df['RAC1P'] = df['RAC1P'].replace([3, 4, 5], 9997)
+    df['RAC1P'] = df['RAC1P'].replace([6, 7], 9998)
+    df['RAC1P'] = df['RAC1P'].replace([8, 9], 9999)
     df['RAC1P'] = df['RAC1P'].astype('category')
 
     # Get group labels
@@ -78,7 +79,7 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
     group_names, groups = np.unique(groups, return_inverse=True)
     loader_outputs['groups'] = groups
     loader_outputs['group_names'] = [
-        category_names['RAC1P'][str(int(n))] for n in group_names
+        category_names['RAC1P'][n] for n in group_names
     ]
 
   D = loader.dataset_from_loader_outputs(loader_outputs)
