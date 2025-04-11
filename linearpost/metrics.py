@@ -351,10 +351,10 @@ class MetricLogger:
   @classmethod
   def from_csv(cls, path: str, *args, **kwargs) -> 'MetricLogger':
     logger = cls(*args, **kwargs)
-    if os.path.exists(path):
+    if path and os.path.exists(path):
       df = pd.read_csv(path, header=[0, 1], index_col=[0])
       logger.all_metrics = df.to_dict(orient='list')
-    else:
+    elif path:
       warnings.warn(
           f"Metrics file {path} does not exist. Blank logger created.")
     return logger

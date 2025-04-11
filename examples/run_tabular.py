@@ -123,8 +123,10 @@ def main():
   cache_dir = args.cache_dir
   results_dir = args.results_dir
   overwrite_results = args.overwrite_results
+  bootstrap_n_resamples = args.bootstrap_n_resamples
   seed = args.seed
   device = args.device or 'cuda' if torch.cuda.is_available() else 'cpu'
+  dcal = args.dcal
   attribute_awareness = [
       x for x in [args.attr_aware, args.attr_blind] if x is not None
   ]
@@ -191,21 +193,14 @@ def main():
         result_path = os.path.join(results_dir, result_fname)
         loggers = {}
         for split in ['val', 'test']:
-          if overwrite_results:
-            loggers[split] = metrics.MetricLogger(
-                n_classes=n_classes,
-                n_groups=n_groups,
-                return_std_err=True,
-                random_state=seed,
-            )
-          else:
-            loggers[split] = metrics.MetricLogger.from_path(
-                result_path.format(split=split),
-                n_classes=n_classes,
-                n_groups=n_groups,
-                return_std_err=True,
-                random_state=seed,
-            )
+          loggers[split] = metrics.MetricLogger.from_path(
+              None if overwrite_results else result_path.format(split=split),
+              n_classes=n_classes,
+              n_groups=n_groups,
+              return_std_err=True,
+              n_resamples=bootstrap_n_resamples,
+              random_state=seed,
+          )
 
         preds_val = D_post.split['val']['p_y_x'].argmax(axis=1)
         metrics_baseline = metrics.evaluate(
@@ -281,7 +276,7 @@ def main():
           print('.', end='', flush=True)
 
         if alphas:
-          print(" done")
+          print(" Done")
 
 
 def parse_args():
@@ -317,6 +312,7 @@ def parse_args():
   parser.add_argument("--cache_dir", type=str, default="cache")
   parser.add_argument("--results_dir", type=str, default="results")
   parser.add_argument("--overwrite_results", action='store_true', default=False)
+  parser.add_argument("--bootstrap_n_resamples", type=int, default=1000)
 
   args = parser.parse_args()
   return args
