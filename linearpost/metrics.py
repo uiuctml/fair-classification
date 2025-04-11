@@ -282,6 +282,11 @@ def evaluate_overlapping(y_true,
                        random_state=random_state)
 
   # group s = 0 is not protected and will be ignored
+  mask = groups.sum(axis=1) > 0
+  y_true = y_true[mask]
+  y_preds = y_preds[mask]
+  groups = groups[mask]
+
   n_groups_overlap = groups.shape[1]
   ways_name = ('all_ways' if ways == 'all' else ','.join(map(str, ways)) +
                '-ways')
