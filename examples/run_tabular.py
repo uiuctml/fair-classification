@@ -91,7 +91,7 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
   )
   if remove_sensitive_attr:
     D['X'].drop([sensitive_attr], inplace=True, axis=1)
-  print('Dataset columns:', D['X'].columns.tolist())
+  print('  - Dataset columns:', ', '.join(D['X'].columns))
   D.preprocess_tabular('X', train_split_name='pre', inplace=True)
   return D
 
@@ -191,13 +191,21 @@ def main():
         result_path = os.path.join(results_dir, result_fname)
         loggers = {}
         for split in ['val', 'test']:
-          loggers[split] = metrics.MetricLogger.from_path(
-              result_path.format(split=split),
-              n_classes=n_classes,
-              n_groups=n_groups,
-              return_std_err=True,
-              random_state=seed,
-          )
+          if overwrite_results:
+            loggers[split] = metrics.MetricLogger(
+                n_classes=n_classes,
+                n_groups=n_groups,
+                return_std_err=True,
+                random_state=seed,
+            )
+          else:
+            loggers[split] = metrics.MetricLogger.from_path(
+                result_path.format(split=split),
+                n_classes=n_classes,
+                n_groups=n_groups,
+                return_std_err=True,
+                random_state=seed,
+            )
 
         preds_val = D_post.split['val']['p_y_x'].argmax(axis=1)
         metrics_baseline = metrics.evaluate(
@@ -215,13 +223,16 @@ def main():
         alphas = [float('inf')] + list(
             np.linspace(0.001, alpha_max, num=n_alphas).flatten())[:-1][::-1]
 
+        alphas_val_exist = np.array([])
+        alphas_test_exist = np.array([])
+        alpha_isin = lambda alpha, exist: np.isclose(alpha, exist).any()
         if not overwrite_results and len(loggers['val']) and len(
             loggers['test']):
+          alphas_val_exist = loggers['val'].df['alpha'].values.flatten()
+          alphas_test_exist = loggers['test'].df['alpha'].values.flatten()
           alphas_exist = np.array(
-              list(
-                  set(loggers['val'].df['alpha'].values.flatten().tolist()) &
-                  set(loggers['test'].df['alpha'].values.flatten().tolist())))
-          alphas = [a for a in alphas if not np.isclose(a, alphas_exist).any()]
+              list(set(alphas_val_exist) & set(alphas_test_exist)))
+          alphas = [a for a in alphas if not alpha_isin(a, alphas_exist)]
 
         if alphas:
           print(
@@ -255,14 +266,17 @@ def main():
 
           for split, preds in zip(['val', 'test'],
                                   [fair_preds_val, fair_preds_test]):
-            loggers[split].log_evaluate(
-                D_post.split[split]['labels'],
-                preds,
-                D_post.split[split]['groups'],
-                alpha=alpha,
-                seed=seed,
-            )
-            loggers[split].to_path(result_path.format(split=split))
+            if not alpha_isin(
+                alpha,
+                alphas_val_exist if split == 'val' else alphas_test_exist):
+              loggers[split].log_evaluate(
+                  D_post.split[split]['labels'],
+                  preds,
+                  D_post.split[split]['groups'],
+                  alpha=alpha,
+                  seed=seed,
+              )
+              loggers[split].to_path(result_path.format(split=split))
 
           print('.', end='', flush=True)
 

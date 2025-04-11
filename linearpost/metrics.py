@@ -282,15 +282,16 @@ class MetricLogger:
       return len(next(iter(self.all_metrics.values())))
 
   def log(self, metrics):
+    curr_len = len(self)
     for name, value in metrics.items():
       k = (name, 'mean')
       if k not in self.all_metrics:
-        self.all_metrics[k] = [None] * len(self)
+        self.all_metrics[k] = [None] * curr_len
       self.all_metrics[k].append(value[0])
       if len(value) > 1:
         k = (name, 'std')
         if k not in self.all_metrics:
-          self.all_metrics[k] = [None] * len(self)
+          self.all_metrics[k] = [None] * curr_len
         self.all_metrics[k].append(value[1])
     # Fill in missing entries with None for consistency
     for name in set(k[0] for k in self.all_metrics.keys()) - set(
