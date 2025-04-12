@@ -114,12 +114,16 @@ def main():
   args = parse_args()
   dataset_name = args.dataset_name
   data_dir_base = args.data_dir_base
-  criteria = args.criteria
   model_names = args.model_names
-  results_dir = args.results_dir
+  criteria = args.criteria
+  n_alphas = args.n_alphas
   cache_dir = args.cache_dir
+  results_dir = args.results_dir
+  overwrite_results = args.overwrite_results
+  bootstrap_n_resamples = args.bootstrap_n_resamples
   seed = args.seed
   device = args.device or 'cuda' if torch.cuda.is_available() else 'cpu'
+  dcal = args.dcal
 
   # Model training hyperparameters that are not exposed
   batch_size = 32
@@ -148,7 +152,7 @@ def main():
         D_post = Dataset.from_path(cache_path)
         n_classes = D_post.features['labels'].n_categories
         n_groups = D_post.features['groups'].n_categories
-        print(f"Loaded cached dataset from {cache_path}")
+        print(f"  - Loaded cached dataset from {cache_path}")
 
       else:
         D = get_dataset(dataset_name, data_dir_base, seed=seed)
@@ -203,16 +207,18 @@ def main():
                                                    n_classes).sum(axis=1)
 
         D_post.to_path(cache_path)
-        print(f"Cached dataset to {cache_path}")
+        print(f"  - Cached dataset to {cache_path}")
 
       result_fname = f"{{split}}_linearpost_{dataset_name}_{model_name_short}_{criterion}.csv"
       result_path = os.path.join(results_dir, result_fname)
       loggers = {}
       for split in ['val', 'test']:
-        loggers[split] = metrics.MetricLogger(
+        loggers[split] = metrics.MetricLogger.from_path(
+            None if overwrite_results else result_path.format(split=split),
             n_classes=n_classes,
             n_groups=n_groups,
             return_std_err=True,
+            n_resamples=bootstrap_n_resamples,
             random_state=seed,
         )
 
@@ -224,13 +230,31 @@ def main():
           n_classes=n_classes,
           n_groups=n_groups,
       )
-      if criterion == 'tpr':
-        criterion_metric_name = 'tpr_binary_disparity' if n_classes == 2 else 'tpr_micro_disparity'
+      if criterion == 'tpr' and n_classes == 2:
+        criterion_metric_name = 'tpr_binary_disparity'
       else:
         criterion_metric_name = f'{criterion}_disparity'
       alpha_max = metrics_baseline[criterion_metric_name]
       alphas = [float('inf')] + list(
-          np.linspace(0.001, alpha_max, num=16).flatten())[:-1][::-1]
+          np.linspace(0.001, alpha_max, num=n_alphas).flatten())[:-1][::-1]
+
+      alphas_val_exist = np.array([])
+      alphas_test_exist = np.array([])
+      alpha_isin = lambda alpha, exist: np.isclose(alpha, exist).any()
+      if not overwrite_results and len(loggers['val']) and len(loggers['test']):
+        alphas_val_exist = loggers['val'].df['alpha'].values.flatten()
+        alphas_test_exist = loggers['test'].df['alpha'].values.flatten()
+        alphas_exist = np.array(
+            list(set(alphas_val_exist) & set(alphas_test_exist)))
+        alphas = [a for a in alphas if not alpha_isin(a, alphas_exist)]
+
+      if alphas:
+        print(
+            f"  - Post-processing with alpha: {', '.join([f'{alpha:.4f}' for alpha in alphas])} ",
+            end='',
+            flush=True)
+      else:
+        print("  - Skipping, no new alpha to process")
 
       for alpha in alphas:
         postprocessor = postprocess.LinearPostSimple(
@@ -256,14 +280,21 @@ def main():
 
         for split, preds in zip(['val', 'test'],
                                 [fair_preds_val, fair_preds_test]):
-          loggers[split].log_evaluate(
-              D_post.split[split]['labels'],
-              preds,
-              D_post.split[split]['groups'],
-              alpha=alpha,
-              seed=seed,
-          )
-          loggers[split].to_path(result_path.format(split=split))
+          if not alpha_isin(
+              alpha, alphas_val_exist if split == 'val' else alphas_test_exist):
+            loggers[split].log_evaluate(
+                D_post.split[split]['labels'],
+                preds,
+                D_post.split[split]['groups'],
+                alpha=alpha,
+                seed=seed,
+            )
+            loggers[split].to_path(result_path.format(split=split))
+
+        print('.', end='', flush=True)
+
+      if alphas:
+        print(" Done")
 
 
 def parse_args():
@@ -276,23 +307,27 @@ def parse_args():
   )
   parser.add_argument("--data_dir_base", type=str, required=False)
   parser.add_argument(
+      "--model_names",
+      type=str,
+      nargs='+',
+      default=["google-bert/bert-base-uncased"],
+  )
+  parser.add_argument(
       "--criteria",
       type=str,
       nargs='+',
       default=["sp", "tpr", "eo"],
       choices=["sp", "tpr", "fpr", "eo"],
   )
-  parser.add_argument(
-      "--model_names",
-      type=str,
-      nargs='+',
-      default=["google-bert/bert-base-uncased"],
-  )
+  parser.add_argument('--n_alphas', type=int, default=16)
+
   parser.add_argument("--seed", type=int, default=33)
   parser.add_argument("--device", type=str, default=None)
 
-  parser.add_argument("--results_dir", type=str, default="results")
   parser.add_argument("--cache_dir", type=str, default="cache")
+  parser.add_argument("--results_dir", type=str, default="results")
+  parser.add_argument("--overwrite_results", action='store_true', default=False)
+  parser.add_argument("--bootstrap_n_resamples", type=int, default=1000)
 
   args = parser.parse_args()
   return args

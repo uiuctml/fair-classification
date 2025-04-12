@@ -57,20 +57,21 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
     )
     split_sizes = [0.5, 0.1, 0.1, 0.3]
 
-    # Combine RAC1P categories 3, 4, 5, and 6, 7, and 8, 9 into new categories
-    # 10, 11, and 12 respectively, due to small sample size in some groups.
+    # Combine RAC1P categories [3, 4, 5], [6, 7], and [8, 9] into new categories
+    # 9997, 9998, and 9999 resp., due to small sample size in some groups.
     # This is also consistent with the UCI Adult dataset.
     category_names = loader_outputs['category_names']
-    category_names['RAC1P']['9997'] = "American Indian or Alaska Native alone"
-    category_names['RAC1P'][
-        '9998'] = "Asian, Native Hawaiian or Other Pacific Islander alone"
-    category_names['RAC1P']['9999'] = "Other"
+    category_names['RAC1P'].update({
+        9997: "American Indian or Alaska Native alone",
+        9998: "Asian, Native Hawaiian or Other Pacific Islander alone",
+        9999: "Other"
+    })
 
     df = loader_outputs['data']
-    df['RAC1P'] = df['RAC1P'].astype(float)
-    df['RAC1P'] = df['RAC1P'].replace([3.0, 4.0, 5.0], 9997.0)
-    df['RAC1P'] = df['RAC1P'].replace([6.0, 7.0], 9998.0)
-    df['RAC1P'] = df['RAC1P'].replace([8.0, 9.0], 9999.0)
+    df['RAC1P'] = df['RAC1P'].astype(df['RAC1P'].to_numpy().dtype)
+    df['RAC1P'] = df['RAC1P'].replace([3, 4, 5], 9997)
+    df['RAC1P'] = df['RAC1P'].replace([6, 7], 9998)
+    df['RAC1P'] = df['RAC1P'].replace([8, 9], 9999)
     df['RAC1P'] = df['RAC1P'].astype('category')
 
     # Get group labels
@@ -78,7 +79,7 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
     group_names, groups = np.unique(groups, return_inverse=True)
     loader_outputs['groups'] = groups
     loader_outputs['group_names'] = [
-        category_names['RAC1P'][str(int(n))] for n in group_names
+        category_names['RAC1P'][n] for n in group_names
     ]
 
   D = loader.dataset_from_loader_outputs(loader_outputs)
@@ -90,7 +91,7 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
   )
   if remove_sensitive_attr:
     D['X'].drop([sensitive_attr], inplace=True, axis=1)
-  print('Dataset columns:', D['X'].columns.tolist())
+  print('  - Dataset columns:', ', '.join(D['X'].columns))
   D.preprocess_tabular('X', train_split_name='pre', inplace=True)
   return D
 
@@ -116,12 +117,16 @@ def main():
   args = parse_args()
   dataset_name = args.dataset_name
   data_dir_base = args.data_dir_base
-  criteria = args.criteria
   models = args.models
-  results_dir = args.results_dir
+  criteria = args.criteria
+  n_alphas = args.n_alphas
   cache_dir = args.cache_dir
+  results_dir = args.results_dir
+  overwrite_results = args.overwrite_results
+  bootstrap_n_resamples = args.bootstrap_n_resamples
   seed = args.seed
   device = args.device or 'cuda' if torch.cuda.is_available() else 'cpu'
+  dcal = args.dcal
   attribute_awareness = [
       x for x in [args.attr_aware, args.attr_blind] if x is not None
   ]
@@ -148,7 +153,7 @@ def main():
           D_post = Dataset.from_path(cache_path)
           n_classes = D_post.features['labels'].n_categories
           n_groups = D_post.features['groups'].n_categories
-          print(f"Loaded cached dataset from {cache_path}")
+          print(f"  - Loaded cached dataset from {cache_path}")
 
         else:
           D = get_dataset(dataset_name,
@@ -182,16 +187,18 @@ def main():
                                                        n_classes).sum(axis=1)
 
           D_post.to_path(cache_path)
-          print(f"Cached dataset to {cache_path}")
+          print(f"  - Cached dataset to {cache_path}")
 
         result_fname = f"{{split}}_linearpost_{dataset_name}_{'aware' if aware else 'blind'}_{model}_{criterion}.csv"
         result_path = os.path.join(results_dir, result_fname)
         loggers = {}
         for split in ['val', 'test']:
-          loggers[split] = metrics.MetricLogger(
+          loggers[split] = metrics.MetricLogger.from_path(
+              None if overwrite_results else result_path.format(split=split),
               n_classes=n_classes,
               n_groups=n_groups,
               return_std_err=True,
+              n_resamples=bootstrap_n_resamples,
               random_state=seed,
           )
 
@@ -203,13 +210,32 @@ def main():
             n_classes=n_classes,
             n_groups=n_groups,
         )
-        if criterion == 'tpr':
-          criterion_metric_name = 'tpr_binary_disparity' if n_classes == 2 else 'tpr_micro_disparity'
+        if criterion == 'tpr' and n_classes == 2:
+          criterion_metric_name = 'tpr_binary_disparity'
         else:
           criterion_metric_name = f'{criterion}_disparity'
         alpha_max = metrics_baseline[criterion_metric_name]
         alphas = [float('inf')] + list(
-            np.linspace(0.001, alpha_max, num=16).flatten())[:-1][::-1]
+            np.linspace(0.001, alpha_max, num=n_alphas).flatten())[:-1][::-1]
+
+        alphas_val_exist = np.array([])
+        alphas_test_exist = np.array([])
+        alpha_isin = lambda alpha, exist: np.isclose(alpha, exist).any()
+        if not overwrite_results and len(loggers['val']) and len(
+            loggers['test']):
+          alphas_val_exist = loggers['val'].df['alpha'].values.flatten()
+          alphas_test_exist = loggers['test'].df['alpha'].values.flatten()
+          alphas_exist = np.array(
+              list(set(alphas_val_exist) & set(alphas_test_exist)))
+          alphas = [a for a in alphas if not alpha_isin(a, alphas_exist)]
+
+        if alphas:
+          print(
+              f"  - Post-processing with alpha: {', '.join([f'{alpha:.4f}' for alpha in alphas])} ",
+              end='',
+              flush=True)
+        else:
+          print("  - Skipping, no new alpha to process")
 
         for alpha in alphas:
           postprocessor = postprocess.LinearPostSimple(
@@ -235,14 +261,22 @@ def main():
 
           for split, preds in zip(['val', 'test'],
                                   [fair_preds_val, fair_preds_test]):
-            loggers[split].log_evaluate(
-                D_post.split[split]['labels'],
-                preds,
-                D_post.split[split]['groups'],
-                alpha=alpha,
-                seed=seed,
-            )
-            loggers[split].to_path(result_path.format(split=split))
+            if not alpha_isin(
+                alpha,
+                alphas_val_exist if split == 'val' else alphas_test_exist):
+              loggers[split].log_evaluate(
+                  D_post.split[split]['labels'],
+                  preds,
+                  D_post.split[split]['groups'],
+                  alpha=alpha,
+                  seed=seed,
+              )
+              loggers[split].to_path(result_path.format(split=split))
+
+          print('.', end='', flush=True)
+
+        if alphas:
+          print(" Done")
 
 
 def parse_args():
@@ -255,26 +289,30 @@ def parse_args():
   )
   parser.add_argument("--data_dir_base", type=str, required=False)
   parser.add_argument(
-      "--criteria",
-      type=str,
-      nargs='+',
-      default=["sp", "tpr", "eo"],
-      choices=["sp", "tpr", "fpr", "eo"],
-  )
-  parser.add_argument(
       "--models",
       type=str,
       nargs='+',
       default=["logreg", "lgbm", "mlp"],
       choices=["logreg", "lgbm", "mlp"],
   )
+  parser.add_argument(
+      "--criteria",
+      type=str,
+      nargs='+',
+      default=["sp", "tpr", "eo"],
+      choices=["sp", "tpr", "fpr", "eo"],
+  )
+  parser.add_argument('--n_alphas', type=int, default=16)
   parser.add_argument('--attr_aware', action='store_true', default=None)
   parser.add_argument('--attr_blind', action='store_false', default=None)
+
   parser.add_argument("--seed", type=int, default=33)
   parser.add_argument("--device", type=str, default=None)
 
-  parser.add_argument("--results_dir", type=str, default="results")
   parser.add_argument("--cache_dir", type=str, default="cache")
+  parser.add_argument("--results_dir", type=str, default="results")
+  parser.add_argument("--overwrite_results", action='store_true', default=False)
+  parser.add_argument("--bootstrap_n_resamples", type=int, default=1000)
 
   args = parser.parse_args()
   return args

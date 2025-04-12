@@ -234,7 +234,7 @@ def evaluate(y_true: Optional[np.ndarray] = None,
                                                     ord=1,
                                                     **kwargs)
     if y_true is not None:
-      tpr_metric_name = 'tpr_binary_disparity' if n_classes == 2 else 'tpr_micro_disparity'
+      tpr_metric_name = 'tpr_binary_disparity' if n_classes == 2 else 'tpr_disparity'
       metrics[f'{tpr_metric_name}'] = tpr_disparity(y_true, y_preds, groups,
                                                     **kwargs)
       metrics[f'{tpr_metric_name}_weighted'] = tpr_disparity(y_true,
@@ -244,7 +244,7 @@ def evaluate(y_true: Optional[np.ndarray] = None,
                                                              ord=1,
                                                              **kwargs)
       if n_classes > 2:
-        metrics['tpr_micro_disparity_rms'] = tpr_disparity(
+        metrics['tpr_disparity_rms'] = tpr_disparity(
             y_true, y_preds, groups, ord=2, **kwargs) / np.sqrt(n_classes)
       if n_classes == 2:
         metrics['fpr_binary_disparity'] = fpr_disparity(y_true, y_preds, groups,
@@ -340,19 +340,25 @@ class MetricLogger:
     self.return_std_err = return_std_err
     self.n_resamples = n_resamples
     self.random_state = random_state
-    self.n_entries = 0
     self.all_metrics = {}
 
+  def __len__(self):
+    if not self.all_metrics:
+      return 0
+    else:
+      return len(next(iter(self.all_metrics.values())))
+
   def log(self, metrics):
+    curr_len = len(self)
     for name, value in metrics.items():
       k = (name, 'mean')
       if k not in self.all_metrics:
-        self.all_metrics[k] = [None] * self.n_entries
+        self.all_metrics[k] = [None] * curr_len
       self.all_metrics[k].append(value[0])
       if len(value) > 1:
         k = (name, 'std')
         if k not in self.all_metrics:
-          self.all_metrics[k] = [None] * self.n_entries
+          self.all_metrics[k] = [None] * curr_len
         self.all_metrics[k].append(value[1])
     # Fill in missing entries with None for consistency
     for name in set(k[0] for k in self.all_metrics.keys()) - set(
@@ -360,7 +366,6 @@ class MetricLogger:
       for k in [(name, 'mean'), (name, 'std')]:
         if k in self.all_metrics:
           self.all_metrics[k].append(None)
-    self.n_entries += 1
 
   def log_evaluate(self, y_true, y_preds, groups=None, **kwargs):
     metrics = {k: v if isinstance(v, tuple) else (v,) for k, v in kwargs.items()}
@@ -413,16 +418,14 @@ class MetricLogger:
     # print(f"Metrics saved to {path}")
 
   @classmethod
-  def from_csv(cls,
-               path: str,
-               n_classes: Optional[int] = None,
-               *args,
-               **kwargs) -> 'MetricLogger':
-    logger = cls(n_classes, *args, **kwargs)
-    if os.path.exists(path):
+  def from_csv(cls, path: str, *args, **kwargs) -> 'MetricLogger':
+    logger = cls(*args, **kwargs)
+    if path and os.path.exists(path):
       df = pd.read_csv(path, header=[0, 1], index_col=[0])
-      logger.n_entries = len(df)
       logger.all_metrics = df.to_dict(orient='list')
+    elif path:
+      warnings.warn(
+          f"Metrics file {path} does not exist. Blank logger created.")
     return logger
 
   def to_path(self, path: str):
@@ -450,7 +453,7 @@ class MetricLogger:
 
   def __repr__(self):
     s = "MetricLogger:\n\n"
-    for i in range(self.n_entries):
+    for i in range(len(self)):
       metrics = {}
       for name in self.all_metrics.keys():
         name = name[0]
