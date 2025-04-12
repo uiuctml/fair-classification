@@ -7,6 +7,7 @@ import csv
 import os
 import pickle
 import urllib.request
+import zipfile
 import json
 from pathlib import Path
 
@@ -15,7 +16,7 @@ import pandas as pd
 
 import folktables
 
-from .dataset import Dataset, Array, Categorical
+from .dataset import Dataset, Array, Categorical, Multilabel
 
 
 def dataset_from_loader_outputs(outputs) -> Dataset:
@@ -35,8 +36,12 @@ def dataset_from_loader_outputs(outputs) -> Dataset:
   }
   if 'groups' in outputs:
     data['groups'] = outputs['groups']
-    features['groups'] = Categorical(n_categories=len(outputs['group_names']),
-                                     category_names=outputs['group_names'])
+    if data['groups'].ndim == 1:
+      features['groups'] = Categorical(n_categories=len(outputs['group_names']),
+                                       category_names=outputs['group_names'])
+    elif data['groups'].ndim == 2:
+      features['groups'] = Multilabel(n_labels=outputs['groups'].shape[1],
+                                      label_names=outputs['group_names'])
   dataset = Dataset(data=data, features=features)
   if 'split_idx' in outputs:
     dataset.split_idx = outputs['split_idx']
@@ -49,14 +54,24 @@ def dataset_from_loader_outputs(outputs) -> Dataset:
 
 def group_label_statistics(dataset: Dataset,
                            normalize: bool = False) -> pd.DataFrame:
-  df_stat = pd.DataFrame(
-      np.stack([dataset['groups'], dataset['labels']], axis=1),
-      columns=['groups', 'labels'],
-  ).groupby(['labels', 'groups']).size().unstack()
-  df_stat.rename(
-      index=dict(enumerate(dataset.features['labels'].category_names)),
-      columns=dict(enumerate(dataset.features['groups'].category_names)),
-      inplace=True)
+  if isinstance(dataset.features['groups'], Categorical):
+    df_stat = pd.DataFrame(
+        np.stack([dataset['groups'], dataset['labels']], axis=1),
+        columns=['groups', 'labels'],
+    ).groupby(['labels', 'groups']).size().unstack()
+    df_stat.rename(
+        index=dict(enumerate(dataset.features['labels'].category_names)),
+        columns=dict(enumerate(dataset.features['groups'].category_names)),
+        inplace=True)
+  else:
+    df_stat = pd.DataFrame(
+        np.concatenate([dataset['groups'], dataset['labels'][:, None]], axis=1),
+        columns=dataset.features['groups'].label_names + ['labels'],
+    ).groupby('labels').sum()
+    df_stat.rename(
+        index=dict(enumerate(dataset.features['labels'].category_names)),
+        inplace=True,
+    )
   if normalize:
     df_stat /= len(dataset)
   return df_stat
@@ -379,4 +394,82 @@ def biasbios(data_dir):
       'label_names': label_names,
       'group_names': group_names,
       'splits': splits
+  }
+
+
+def jigsaw(data_dir,
+           sensitive_attr='religion',
+           sensitive_attr_values=None,
+           drop_rows_without_group=False,
+           toxicity_threshold=0,
+           group_threshold=0):
+  CIVILCOMMENT_IDENTITIES = {
+      'gender': ["male", "female", "transgender", "other_gender"],
+      'sexual_orientation': [
+          "heterosexual", "homosexual_gay_or_lesbian", "bisexual",
+          "other_sexual_orientation"
+      ],
+      'religion': [
+          "christian", "jewish", "muslim", "hindu", "buddhist", "atheist",
+          "other_religion"
+      ],
+      'race': ["black", "white", "asian", "latino", "other_race_or_ethnicity"],
+      'disability': [
+          "physical_disability", "intellectual_or_learning_disability",
+          "psychiatric_or_mental_illness", "other_disability"
+      ]
+  }
+
+  data_path = os.path.join(data_dir, "civil_comments.csv")
+  if not os.path.exists(data_path):
+    os.makedirs(data_dir, exist_ok=True)
+    urllib.request.urlretrieve(
+        'https://storage.googleapis.com/jigsaw-unintended-bias-in-toxicity-classification/civil_comments_v1.2.zip',
+        os.path.join(data_dir, "civil_comments_v1.2.zip"))
+    with zipfile.ZipFile(os.path.join(data_dir, "civil_comments_v1.2.zip"),
+                         "r") as zip_ref:
+      zip_ref.extract("civil_comments.csv", data_dir)
+
+  df_raw = pd.read_csv(data_path, low_memory=False)
+
+  # drop unused columns
+  cols_to_drop = [
+      c for c in df_raw.columns
+      if c not in ['comment_text', 'toxicity', 'split'] +
+      sum(CIVILCOMMENT_IDENTITIES.values(), [])
+  ]
+  df_raw.drop(columns=cols_to_drop, inplace=True)
+
+  # remove na rows
+  df_raw = df_raw.dropna()
+
+  df_raw['toxicity'] = df_raw['toxicity'] > toxicity_threshold
+  for a in CIVILCOMMENT_IDENTITIES[sensitive_attr]:
+    df_raw[a] = df_raw[a] > group_threshold
+
+  if sensitive_attr_values is not None:
+    CIVILCOMMENT_IDENTITIES[sensitive_attr] = sensitive_attr_values
+
+  if drop_rows_without_group:
+    df_raw = df_raw[df_raw[CIVILCOMMENT_IDENTITIES[sensitive_attr]].any(axis=1)]
+
+  # Encode labels and groups
+  labels = df_raw['toxicity'].astype(int).to_numpy()
+  group_names = CIVILCOMMENT_IDENTITIES[sensitive_attr]
+  groups = np.stack([df_raw[a].astype(int).to_numpy() for a in group_names],
+                    axis=1)
+
+  comments = df_raw['comment_text'].to_numpy()
+
+  return {
+      'data': comments,
+      'labels': labels,
+      'groups': groups,
+      'label_names': ['non-toxic', 'toxic'],
+      'group_names': group_names,
+      'split_idx': {
+          'train': np.where((df_raw["split"] == "train").to_numpy())[0],
+          'val': np.where((df_raw["split"] == "test_public").to_numpy())[0],
+          'test': np.where((df_raw["split"] == "test_private").to_numpy())[0],
+      }
   }

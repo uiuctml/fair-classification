@@ -23,6 +23,12 @@ class Categorical(Feature):
 
 
 @dataclass(kw_only=True)
+class Multilabel(Feature):
+  n_labels: Optional[int] = None
+  label_names: Optional[list[str]] = None
+
+
+@dataclass(kw_only=True)
 class Array(Feature):
   column_names: Optional[dict[str, str]] = None
   category_names: Optional[dict[str, dict[str, str]]] = None
@@ -262,6 +268,8 @@ class Dataset:
     for column_name, feature in self.features.items():
       if isinstance(feature, Categorical):
         s += f'  - {column_name} ({feature.n_categories or "?"} categories)\n'
+      elif isinstance(feature, Multilabel):
+        s += f'  - {column_name} ({feature.n_labels or "?"} multilabel)\n'
       else:
         if isinstance(self.data[column_name], pd.DataFrame):
           s += f'  - {column_name} (DataFrame), shape: {self.data[column_name].shape}\n'
