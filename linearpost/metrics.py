@@ -283,8 +283,8 @@ def evaluate_overlapping(y_true,
 
   # group s = 0 is not protected and will be ignored
   n_groups_overlap = groups.shape[1]
-  ways_name = ('all_ways' if ways == 'all' else ','.join(map(str, ways)) +
-               '-ways')
+  ways_name = ('all-way' if ways == 'all' else ','.join(map(str, ways)) +
+               '-way')
   ways = list(range(1, n_groups_overlap + 1)) if ways == 'all' else ways
   subgroups_enc = (groups * 2**np.arange(n_groups_overlap)).sum(axis=1)
 

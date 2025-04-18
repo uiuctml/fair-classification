@@ -212,16 +212,18 @@ class Dataset:
                          inplace=False) -> None | np.ndarray:
     x = self[column_name]
     assert isinstance(x, (pd.DataFrame, np.ndarray))
-    self.data[column_name] = pd.get_dummies(x)
+    y_df = pd.get_dummies(x)
     if train_split_name is None:
-      x_train = self[column_name]
+      x_train = y_df
     else:
-      x_train = self.split[train_split_name][column_name]
+      x_train = y_df.iloc[self.split_idx[train_split_name]]
     scaler = StandardScaler().fit(x_train)
-    y = scaler.transform(self[column_name])
+    y = scaler.transform(y_df)
     if inplace:
       self.data[column_name] = y
-      self.features[column_name] = Array()
+      self.features[column_name] = Array(column_names={
+          i: n for i, n in enumerate(y_df.columns)
+      })
     else:
       return y
 

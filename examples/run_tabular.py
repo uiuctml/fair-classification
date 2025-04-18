@@ -82,6 +82,9 @@ def get_dataset(name, data_dir_base, remove_sensitive_attr=False, seed=None):
         category_names['RAC1P'][n] for n in group_names
     ]
 
+  else:
+    raise NotImplementedError
+
   D = loader.dataset_from_loader_outputs(loader_outputs)
   D.create_splits(
       split_sizes,
@@ -126,7 +129,6 @@ def main():
   bootstrap_n_resamples = args.bootstrap_n_resamples
   seed = args.seed
   device = args.device or 'cuda' if torch.cuda.is_available() else 'cpu'
-  dcal = args.dcal
   attribute_awareness = [
       x for x in [args.attr_aware, args.attr_blind] if x is not None
   ]
@@ -221,10 +223,11 @@ def main():
         alphas_val_exist = np.array([])
         alphas_test_exist = np.array([])
         alpha_isin = lambda alpha, exist: np.isclose(alpha, exist).any()
-        if not overwrite_results and len(loggers['val']) and len(
-            loggers['test']):
-          alphas_val_exist = loggers['val'].df['alpha'].values.flatten()
-          alphas_test_exist = loggers['test'].df['alpha'].values.flatten()
+        if not overwrite_results:
+          if len(loggers['val']):
+            alphas_val_exist = loggers['val'].df['alpha'].values.flatten()
+          if len(loggers['test']):
+            alphas_test_exist = loggers['test'].df['alpha'].values.flatten()
           alphas_exist = np.array(
               list(set(alphas_val_exist) & set(alphas_test_exist)))
           alphas = [a for a in alphas if not alpha_isin(a, alphas_exist)]
