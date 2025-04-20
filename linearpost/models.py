@@ -1,5 +1,11 @@
+from typing import Optional, Literal
+
 import numpy as np
 import torch
+from torch import nn
+from sklearn.base import clone
+
+from .utils import projection_simplex
 
 
 class MLPClassifier:
@@ -90,3 +96,100 @@ class MLPClassifier:
 
   def predict(self, X):
     return self.predict_proba(X).argmax(axis=1)
+
+
+# Implements https://arxiv.org/abs/2107.05719
+
+
+class CriticDecision:
+
+  def __init__(self, n_actions=2, lr=0.001, max_iter=100, device='cpu'):
+    self.n_actions = n_actions
+    self.lr = lr
+    self.max_iter = max_iter
+    self.device = device
+
+  def fit(self, X, y):
+    self.n_classes_ = X.shape[1]
+    self.W_ = nn.Parameter(torch.randn((self.n_classes_, self.n_actions)))
+
+    X = torch.as_tensor(X).to(self.device)  # probas P
+    y = torch.as_tensor(y, dtype=torch.long)  # labels Y
+    diff = (torch.eye(self.n_classes_)[y].to(self.device) - X)  # Y - P
+    optimizer = torch.optim.Adam([self.W_], lr=self.lr)
+
+    def closure():
+      optimizer.zero_grad()
+      probas_action = self.forward_(X)  # action probas B
+      R = (probas_action[..., None] * diff[:, None, :]).mean(dim=0)
+      loss = (R**2).sum()
+      (-loss).backward()
+      return loss
+
+    for _ in range(self.max_iter):
+      loss = closure()
+      optimizer.step()
+    self.score_ = loss.item()
+    return self
+
+  def forward_(self, X):
+    return torch.nn.functional.softmax(X @ self.W_, dim=-1)
+
+  def predict_proba(self, X):
+    X = torch.as_tensor(X).to(self.device)
+    with torch.no_grad():
+      return self.forward_(X).detach().cpu().numpy()
+
+  def predict(self, X):
+    return self.predict_proba(X).argmax(axis=-1)
+
+
+class DecisionCalibrator:
+
+  def __init__(self,
+               n_actions=2,
+               critic=None,
+               max_iter=10,
+               projection: Optional[Literal['simplex', 'clip']] = 'simplex'):
+    self.n_actions = n_actions
+    self.critic = critic
+    self.max_iter = max_iter
+    self.projection = projection
+    self.predict_fns_ = []
+    self.adjustments_ = []
+    self.scores_ = []
+
+  def fit(self, X, y):
+    if self.critic is None:
+      self.critic = CriticDecision(n_actions=self.n_actions)
+    for _ in range(self.max_iter):
+      predictor = clone(self.critic).fit(X, y)
+      X = self.add_(X, y, predictor.predict_proba)
+    return self
+
+  def add_(self, X, y, predict_fn, probas_action=None, **kwargs):
+    n_samples, n_classes = X.shape  # shape = [N, C]
+    if probas_action is None:
+      probas_action = predict_fn(X, **kwargs)
+    diff = np.eye(n_classes)[y] - X  # Y - P
+    D = probas_action.T @ probas_action / n_samples
+    Di = np.linalg.pinv(D)
+    R = np.mean(probas_action[..., None] * diff[:, None, :], axis=0)
+    adjustment = R.T @ Di
+    self.adjustments_.append(adjustment)
+    self.predict_fns_.append(predict_fn)
+    self.scores_.append((R**2).sum())
+    return self.apply_(X, adjustment, probas_action)
+
+  def apply_(self, X, adjustment, probas_action):
+    X = X + (adjustment @ probas_action[..., None]).squeeze(-1)
+    if self.projection == 'simplex':
+      X = projection_simplex(X, axis=1)
+    elif self.projection == 'clip':
+      X = np.clip(X, 0, 1)
+    return X
+
+  def predict_proba(self, X, **kwargs):
+    for predict_fn, adjustment in zip(self.predict_fns_, self.adjustments_):
+      X = self.apply_(X, adjustment, predict_fn(X, **kwargs))
+    return X

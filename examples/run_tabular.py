@@ -1,9 +1,8 @@
+import argparse
+import os
 import sys
 
 sys.path.append('..')
-
-import argparse
-import os
 
 import torch
 import numpy as np
@@ -129,13 +128,14 @@ def main():
   bootstrap_n_resamples = args.bootstrap_n_resamples
   seed = args.seed
   device = args.device or 'cuda' if torch.cuda.is_available() else 'cpu'
+  iters_dcal_ = args.iters_dcal
   attribute_awareness = [
       x for x in [args.attr_aware, args.attr_blind] if x is not None
   ]
   if not attribute_awareness:
     attribute_awareness = [True, False]
 
-  # Postprocessor arguments that are not exposed
+  # Post-processing arguments that are not exposed
   solver = 'GUROBI'
 
   os.makedirs(data_dir_base, exist_ok=True)
@@ -145,35 +145,43 @@ def main():
   for aware in attribute_awareness:
     for model in models:
       for criterion in criteria:
+
+        iters_dcal = iters_dcal_
+        if iters_dcal_ and aware and criterion == 'sp':
+          print(
+              "Setting iters_dcal=0 for sp (aware), because groups are already calibrated"
+          )
+          iters_dcal = 0
         print(
             f"Working on {dataset_name} ({'aware' if aware else 'blind'}) for {criterion} with {model}"
-        )
+            + (f" and {iters_dcal} decision calibration iterations"
+               if iters_dcal else ""))
+
+        ## Pre-training workflow
 
         cache_fname = f"{dataset_name}_{'aware' if aware else 'blind'}_{model}.pickle"
         cache_path = os.path.join(cache_dir, cache_fname)
-        if os.path.exists(cache_path):
-          D_post = Dataset.from_path(cache_path)
-          n_classes = D_post.features['labels'].n_categories
-          n_groups = D_post.features['groups'].n_categories
-          print(f"  - Loaded cached dataset from {cache_path}")
-
-        else:
+        if not os.path.exists(cache_path):
+          # Load dataset
           D = get_dataset(dataset_name,
                           data_dir_base,
                           remove_sensitive_attr=not aware,
                           seed=seed)
-          predictor = get_model(model, device=device, seed=seed)
-
           n_classes = D.features['labels'].n_categories
           n_groups = D.features['groups'].n_categories
           D['labels_ay'] = D['groups'] * n_classes + D['labels']
 
-          # Drop pretrain split from dataset
+          # Get model
+          predictor = get_model(model, device=device, seed=seed)
+
+          # Get a subset of D that excludes the pre-train split
           D_post = D.split[['post', 'val', 'test']]
 
           if aware:
-            # Train Pr[ Y | X ] predictor
+            # Train Pr[ Y | X ] predictor (A is known)
             predictor.fit(D.split['pre']['X'], D.split['pre']['labels'])
+
+            # Get predicted probabilities on D_post
             D_post['p_y_x'] = predictor.predict_proba(D_post['X'])
             D_post['p_a_x'] = np.eye(n_groups)[D_post['groups']]
             D_post['p_ay_x'] = (D_post['p_a_x'][:, :, None] *
@@ -182,6 +190,8 @@ def main():
           else:
             # Train Pr[ A, Y | X ] predictor
             predictor.fit(D.split['pre']['X'], D.split['pre']['labels_ay'])
+
+            # Get predicted probabilities on D_post
             D_post['p_ay_x'] = predictor.predict_proba(D_post['X'])
             D_post['p_a_x'] = D_post['p_ay_x'].reshape(-1, n_groups,
                                                        n_classes).sum(axis=2)
@@ -191,7 +201,16 @@ def main():
           D_post.to_path(cache_path)
           print(f"  - Cached dataset to {cache_path}")
 
-        result_fname = f"{{split}}_linearpost_{dataset_name}_{'aware' if aware else 'blind'}_{model}_{criterion}.csv"
+        else:
+          D_post = Dataset.from_path(cache_path)
+          n_classes = D_post.features['labels'].n_categories
+          n_groups = D_post.features['groups'].n_categories
+          print(f"  - Loaded cached dataset from {cache_path}")
+
+        ## Post-processing workflow
+
+        # Create (or load existing) metric loggers
+        result_fname = f"{{split}}_linearpost{'_dcal'+str(iters_dcal) if iters_dcal else ''}_{dataset_name}_{'aware' if aware else 'blind'}_{model}_{criterion}.csv"
         result_path = os.path.join(results_dir, result_fname)
         loggers = {}
         for split in ['val', 'test']:
@@ -204,6 +223,7 @@ def main():
               random_state=seed,
           )
 
+        # Get alpha sweep from the fairness violation without post-proc to 0.001
         preds_val = D_post.split['val']['p_y_x'].argmax(axis=1)
         metrics_baseline = metrics.evaluate(
             D_post.split['val']['labels'],
@@ -220,6 +240,7 @@ def main():
         alphas = [float('inf')] + list(
             np.linspace(0.001, alpha_max, num=n_alphas).flatten())[:-1][::-1]
 
+        # Remove alphas that have been previously processed and logged
         alphas_val_exist = np.array([])
         alphas_test_exist = np.array([])
         alpha_isin = lambda alpha, exist: np.isclose(alpha, exist).any()
@@ -239,19 +260,27 @@ def main():
               flush=True)
         else:
           print("  - Skipping, no new alpha to process")
+          continue
 
+        # Post-processing using LinearPost
         for alpha in alphas:
           postprocessor = postprocess.LinearPostSimple(
               n_classes=n_classes,
               n_groups=n_groups,
               fairness_criterion=criterion,
               alpha=alpha,
+              max_iters_dcal=iters_dcal,
               seed=seed,
-          ).fit(p_a_x=D_post.split['post']['p_a_x'],
-                p_y_x=D_post.split['post']['p_y_x'],
-                p_ay_x=D_post.split['post']['p_ay_x'],
-                solver=solver,
-                solve_primal=True)
+          ).fit(
+              p_a_x=D_post.split['post']['p_a_x'],
+              p_y_x=D_post.split['post']['p_y_x'],
+              p_ay_x=D_post.split['post']['p_ay_x'],
+              groups=D_post.split['post']['groups'] if iters_dcal else None,
+              labels_ay=(D_post.split['post']['labels_ay']
+                         if iters_dcal else None),
+              solver=solver,
+              solve_primal=True,
+          )
 
           fair_preds_val = postprocessor.predict(
               p_a_x=D_post.split['val']['p_a_x'],
@@ -277,9 +306,7 @@ def main():
               loggers[split].to_path(result_path.format(split=split))
 
           print('.', end='', flush=True)
-
-        if alphas:
-          print(" Done")
+        print(" Done")
 
 
 def parse_args():
@@ -306,6 +333,7 @@ def parse_args():
       choices=["sp", "tpr", "fpr", "eo"],
   )
   parser.add_argument('--n_alphas', type=int, default=16)
+  parser.add_argument('--iters_dcal', type=int, default=0)
   parser.add_argument('--attr_aware', action='store_true', default=None)
   parser.add_argument('--attr_blind', action='store_false', default=None)
 
