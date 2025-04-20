@@ -287,10 +287,10 @@ def parse_args():
   parser.add_argument(
       "--dataset_name",
       type=str,
-      required=False,
+      required=True,
       choices=["adult", "acsincome2", "acsincome5", "compas"],
   )
-  parser.add_argument("--data_dir_base", type=str, required=False)
+  parser.add_argument("--data_dir_base", type=str, default="../data")
   parser.add_argument(
       "--models",
       type=str,
