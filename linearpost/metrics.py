@@ -466,3 +466,45 @@ class MetricLogger:
         metrics[name] = (mean,) if std is None else (mean, std)
       s += self.stringify(metrics) + '\n\n'
     return s.strip()
+
+
+# Helpers for model selection
+
+
+def get_pareto_idx(df_metrics,
+                   fairness_criterion,
+                   performance_metric='accuracy',
+                   tolerance=0.5,
+                   subset=None):
+
+  performance = df_metrics[performance_metric]['mean'].values
+  if 'std' in df_metrics[performance_metric]:
+    performance_std = df_metrics[performance_metric]['std'].values
+  else:
+    performance_std = np.zeros_like(performance)
+  fairness = df_metrics[fairness_criterion]['mean'].values
+  if 'std' in df_metrics[fairness_criterion]:
+    fairness_std = df_metrics[fairness_criterion]['std'].values
+  else:
+    fairness_std = np.zeros_like(fairness)
+
+  def is_pareto(i):
+    a = performance[i] + tolerance * performance_std[i] <= performance
+    f = fairness[i] - tolerance * fairness_std[i] >= fairness
+    return not (any((a & f)[:i]) | any((a & f)[i + 1:]))
+
+  subset = np.arange(len(df_metrics)) if subset is None else subset
+  return np.array([i for i in subset if is_pareto(i)])
+
+
+def get_unique_idx(df_metrics,
+                   fairness_criterion,
+                   performance_metric='accuracy',
+                   subset=None):
+  df = df_metrics.reset_index()
+  if subset is not None:
+    df = df.iloc[subset]
+  i_unique = np.where(~df.duplicated(subset=[(fairness_criterion, 'mean'),
+                                             (performance_metric, 'mean')],
+                                     keep='first'))[0]
+  return df.index[i_unique].values

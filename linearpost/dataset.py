@@ -83,6 +83,9 @@ class Dataset:
     def __init__(self, dataset: 'Dataset'):
       self.dataset = dataset
 
+    def __contains__(self, column_name: str) -> bool:
+      return column_name in self.dataset.data
+
     def __getitem__(self, column_names: str | Sequence[str]) -> 'Dataset':
       if isinstance(column_names, str):
         column_names = [column_names]
@@ -133,6 +136,9 @@ class Dataset:
 
     def __init__(self, dataset: 'Dataset'):
       self.dataset = dataset
+
+    def __contains__(self, split_name: str) -> bool:
+      return split_name in self.dataset.split_idx
 
     def get_split(self, split_name: str) -> 'Dataset':
       dataset = self.dataset.iloc[self.dataset.split_idx[split_name]]
