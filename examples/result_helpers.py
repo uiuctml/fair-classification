@@ -71,14 +71,11 @@ xz24_criteria = ['sp', 'tpr', 'eo']
 xz24_n_alphas = 16
 
 
-def get_xz24_result_paths(dataset_names=None):
+def get_xz24_result_paths(dataset_names=None,
+                          aware=None,
+                          results_dir='results'):
 
-  def get_result_path(dataset_name,
-                      model,
-                      method,
-                      criterion,
-                      aware=False,
-                      results_dir='results'):
+  def get_result_path(dataset_name, model, method, criterion, aware=False):
     if dataset_name == 'biasbios':
       result_fname = f"{{split}}_xz24_{dataset_name}_{model}_{criterion}_{method}.csv"
     else:
@@ -88,13 +85,17 @@ def get_xz24_result_paths(dataset_names=None):
 
   if dataset_names is None:
     dataset_names = xz24_dataset_names
+  if aware is None:
+    awares = [False, True]
+  else:
+    awares = [aware]
 
   # result_paths[dataset_name][model][aware][method][criterion]
   result_paths = defaultdict(
       lambda: defaultdict(lambda: defaultdict(lambda: defaultdict(dict))))
 
   for dataset_name in dataset_names:
-    for aware in [False, True]:
+    for aware in awares:
       if dataset_name in xz24_blind_only:
         if aware:
           continue
@@ -113,9 +114,13 @@ def get_xz24_result_paths(dataset_names=None):
 
 
 def plot_xz24_dataset(dataset_name,
+                      aware=None,
                       performance_metric='accuracy',
-                      weighted_fairness_criterion=False):
-  result_paths = get_xz24_result_paths([dataset_name])
+                      weighted_fairness_criterion=False,
+                      results_dir='results'):
+  result_paths = get_xz24_result_paths([dataset_name],
+                                       aware=aware,
+                                       results_dir=results_dir)
 
   styles = {
       ('linearpost', 'blind'): {

@@ -19,26 +19,32 @@ class LinearPost:
                fairness_constraints: Optional[ConstraintType] = None,
                alpha: Optional[float] = None,
                max_iters_dcal: int = 10,
-               noise_mult: float = 1e-4,
+               noise_scale: Optional[float] = None,
                seed: Optional[int] = None) -> None:
     self.fairness_constraints = fairness_constraints
     self.alpha = alpha
     self.max_iters_dcal = max_iters_dcal
-    self.noise_mult = noise_mult
+    self.noise_scale = noise_scale
     self.seed = seed
     self.rng = np.random.default_rng(seed)
-    self.dcalibs: Optional[list[DecisionCalibrator]] = None
-    self.dcalib_fn = None
+    self.dcalib: Optional[DecisionCalibratorForLinearPost] = None
 
   # TODO: sample weight
   def fit(self,
           risk: np.ndarray,
           probas_group: np.ndarray,
           groups: Optional[np.ndarray] = None,
+          idx_post: Optional[np.ndarray] = None,
+          idx_dcal: Optional[np.ndarray] = None,
           solver: Optional[str] = None,
           solve_kwargs: Optional[dict[str, Any]] = None,
           solve_primal: bool = True) -> 'LinearPost':
     solve_kwargs = solve_kwargs or {}
+
+    if idx_post is None:
+      idx_post = np.arange(risk.shape[0])
+    if idx_dcal is None:
+      idx_dcal = np.arange(risk.shape[0])
 
     if self.alpha is None or self.alpha == float('inf'):
       return self
@@ -55,41 +61,44 @@ class LinearPost:
       ]
 
     # Perturb risk to circumvent colinearity
-    self.risk_mean_ = np.mean(np.max(risk, axis=1))
-    self.noise_scale = self.noise_mult * self.risk_mean_
-    risk = self.perturb_risk(risk)
+    if self.noise_scale is None:
+      self.risk_mean_ = np.mean(np.max(risk, axis=1))
+      self.noise_scale = 1e-4 * self.risk_mean_
+    risk_orig = risk.copy()
+    risk = self.perturb_risk(risk_orig)
 
     # If group labels are given, perform decision calibration before fitting
     if groups is not None:
-      probas_group = self.fit_transform_dcalib_(risk,
-                                                probas_group,
-                                                groups,
-                                                solver=solver,
-                                                solve_kwargs=solve_kwargs,
-                                                solve_primal=solve_primal)
+      self.dcalib = DecisionCalibratorForLinearPost(
+          fairness_constraints=self.fairness_constraints,
+          alpha=self.alpha,
+          max_iters_dcal=self.max_iters_dcal,
+          seed=self.seed).fit(self.perturb_risk(risk_orig[idx_dcal]),
+                              probas_group[idx_dcal],
+                              groups[idx_dcal],
+                              solver=solver,
+                              solve_kwargs=solve_kwargs,
+                              solve_primal=solve_primal)
+      probas_group = self.dcalib.transform(risk, probas_group)
 
-    return self.fit_(risk,
-                     probas_group,
-                     solver=solver,
-                     solve_kwargs=solve_kwargs,
-                     solve_primal=solve_primal)
+    self.fit_(risk[idx_post],
+              probas_group[idx_post],
+              solver=solver,
+              solve_kwargs=solve_kwargs,
+              solve_primal=solve_primal)
+    return self
 
   def fit_(self,
            risk: np.ndarray,
            probas_group: np.ndarray,
            solver: Optional[str] = None,
            solve_kwargs: Optional[dict[str, Any]] = None,
-           solve_primal: bool = True) -> 'LinearPost':
+           solve_primal: bool = True) -> None:
     self.n_psi = sum(len(I) for _, I in self.fairness_constraints)
-
-    marginal_probas_group = probas_group.mean(axis=0)  # shape = (n_groups,)
-    # Set marginal probabilities to 1 if they are 0 to avoid division by 0
-    marginal_probas_group[marginal_probas_group == 0] = 1.0
-    gamma = probas_group / marginal_probas_group[None, ...]
 
     # TODO: catch situations where the solver fails (i.e., numerical issues)
     if solve_primal:
-      problem = self.linprog_primal_(risk, gamma, self.alpha)
+      problem = self.linprog_primal_(risk, probas_group, self.alpha)
       problem.solve(solver=solver, **solve_kwargs)
       self.psi_ = (np.array([
           c.dual_value for c in problem.constraints[-2 * self.n_psi::2]
@@ -97,115 +106,32 @@ class LinearPost:
           [c.dual_value for c in problem.constraints[-2 * self.n_psi + 1::2]]))
       self.phi_ = -problem.constraints[0].dual_value
       self.pi_ = problem.var_dict['pi'].value
+      self.q_ = problem.var_dict['q'].value
     else:
-      problem = self.linprog_dual_(risk, gamma, self.alpha)
+      problem = self.linprog_dual_(risk, probas_group, self.alpha)
       problem.solve(solver=solver, **solve_kwargs)
       self.psi_ = problem.var_dict['psi_pos'].value - problem.var_dict[
           'psi_neg'].value
       self.phi_ = problem.var_dict['phi'].value
 
+    marginals_group_inv = self.get_marginal_probas(probas_group,
+                                                   return_inv=True)
     self.w_ = np.zeros((self.n_classes, self.n_groups))
     for i, (y_c, k) in enumerate(
         self.flatten_constraints(self.fairness_constraints)):
-      self.w_[y_c, k] -= self.psi_[i] / marginal_probas_group[k]
+      self.w_[y_c, k] -= self.psi_[i] * marginals_group_inv[k]
 
     self.score_ = problem.value
     self.risk_ = risk  # for debugging
-    self.gamma_ = gamma
-    return self
-
-  def fit_transform_dcalib_(self,
-                            risk: np.ndarray,
-                            probas_group: np.ndarray,
-                            groups: np.ndarray,
-                            solver: Optional[str] = None,
-                            solve_kwargs: Optional[dict[str, Any]] = None,
-                            solve_primal: bool = True) -> np.ndarray:
-    multilabel = (groups.ndim == 2) and (groups.shape[1]
-                                         == probas_group.shape[1])
-    n_group_labels = groups.shape[1] if multilabel else 1
-
-    def expand_probas_group_for_dcal(probas_group,
-                                     groups=None,
-                                     multilabel=multilabel):
-      if multilabel:
-        probas_group_expanded = np.stack([1 - probas_group, probas_group],
-                                         axis=-1)
-        # probas_group.shape = (n_examples, n_groups, 2)
-        # groups.shape = (n_examples, n_groups)
-      else:
-        probas_group_expanded = probas_group[:, None, :]
-        # probas_group.shape = (n_examples, 1, n_groups)
-        if groups is not None:
-          groups = groups[:, None]  # shape = (n_examples, 1)
-      if groups is not None:
-        return probas_group_expanded, groups
-      else:
-        return probas_group_expanded
-
-    def squeeze_probas_group_expanded_for_dcal(probas_group_expanded,
-                                               multilabel=multilabel):
-      return (probas_group_expanded[:, :, 1]
-              if multilabel else probas_group_expanded[:, 0])
-
-    self.dcalibs = [
-        DecisionCalibrator(n_actions=self.n_groups if not multilabel else 2)
-        for _ in range(n_group_labels)
-    ]
-
-    def dcalib_fn(risk, probas_group):
-      # for t in range(len(self.dcalibs[0].adjustments_)):
-      for t in range(self.max_iters_dcal):
-        probas_group_expanded = expand_probas_group_for_dcal(probas_group)
-        for i, dcalib in enumerate(self.dcalibs):
-          probas_group_expanded[:, i] = dcalib.apply_(
-              probas_group_expanded[:, i], dcalib.adjustments_[t],
-              dcalib.predict_fns_[t](probas_group_expanded[:, i],
-                                     risk=risk,
-                                     probas_group=probas_group))
-        probas_group = squeeze_probas_group_expanded_for_dcal(
-            probas_group_expanded)
-      return probas_group
-
-    self.dcalib_fn = dcalib_fn
-
-    for _ in range(self.max_iters_dcal):
-      postprocessor = LinearPost(fairness_constraints=self.fairness_constraints,
-                                 alpha=self.alpha,
-                                 noise_mult=0,
-                                 seed=self.seed).fit(risk,
-                                                     probas_group,
-                                                     solver=solver,
-                                                     solve_kwargs=solve_kwargs,
-                                                     solve_primal=solve_primal)
-      probas = postprocessor.pi_ if solve_primal else None  # probas_action
-
-      probas_group_expanded, groups_expanded = expand_probas_group_for_dcal(
-          probas_group, groups)
-
-      for i in range(n_group_labels):
-
-        def predict_fn(_, risk, probas_group, postprocessor=postprocessor):
-          return np.eye(self.n_classes)[postprocessor.predict(
-              risk, probas_group)]
-
-        probas_group_one = self.dcalibs[i].add_(probas_group_expanded[:, i],
-                                                groups_expanded[:, i],
-                                                predict_fn,
-                                                probas_action=probas)
-        probas_group_expanded[:, i] = probas_group_one
-      probas_group = squeeze_probas_group_expanded_for_dcal(
-          probas_group_expanded)
-
-    return probas_group
+    self.probas_group_ = probas_group  # for debugging
 
   def predict_score(self, risk: np.ndarray,
                     probas_group: np.ndarray) -> np.ndarray:
     if self.alpha is None or self.alpha == float('inf'):
       return risk
     risk = self.perturb_risk(risk)  # perturb risk to circumvent colinearity
-    if self.dcalibs is not None:
-      probas_group = self.dcalib_fn(risk, probas_group)
+    if self.dcalib is not None:
+      probas_group = self.dcalib.transform(risk, probas_group)
     fair_risk = (probas_group[:, None, :] * self.w_).sum(axis=-1)
     return risk + fair_risk
 
@@ -213,14 +139,12 @@ class LinearPost:
     fair_risk = self.predict_score(risk, probas_group)
     return np.argmin(fair_risk, axis=1)
 
-  def perturb_risk(self, risk: np.ndarray) -> np.ndarray:
-    return risk + self.rng.uniform(
-        -self.noise_scale, self.noise_scale, size=risk.shape)
-
-  def linprog_primal_(self, risk: np.ndarray, gamma: np.ndarray,
+  def linprog_primal_(self, risk: np.ndarray, probas_group: np.ndarray,
                       alpha: float) -> cp.Problem:
     n_examples = risk.shape[0]
     n_constraints = len(self.fairness_constraints)
+    gamma = probas_group * self.get_marginal_probas(probas_group,
+                                                    return_inv=True)
 
     alpha = cp.Parameter(value=alpha, name="alpha")
     pi = cp.Variable((n_examples, self.n_classes), name="pi", nonneg=True)
@@ -233,17 +157,19 @@ class LinearPost:
     constraints.append(cp.sum(pi, axis=1) == 1)
 
     # | sum_x gamma(x, k) * pi(x, y_c) * p(x) - q_c | <= alpha / 2, for all c, k
-    for i, (y_c, I) in enumerate(self.fairness_constraints):
+    for c, (y_c, I) in enumerate(self.fairness_constraints):
       for k in I:
         t = cp.sum(cp.multiply(gamma[:, k], pi[:, y_c]))
-        constraints.append(-alpha * n_examples / 2 <= t - q[i] * n_examples)
-        constraints.append(t - q[i] * n_examples <= alpha * n_examples / 2)
+        constraints.append(-alpha * n_examples / 2 <= t - q[c] * n_examples)
+        constraints.append(t - q[c] * n_examples <= alpha * n_examples / 2)
 
     return cp.Problem(cp.Minimize(cp.sum(cp.multiply(pi, risk))), constraints)
 
-  def linprog_dual_(self, risk: np.ndarray, gamma: np.ndarray,
+  def linprog_dual_(self, risk: np.ndarray, probas_group: np.ndarray,
                     alpha: float) -> cp.Problem:
     n_examples = risk.shape[0]
+    gamma = probas_group * self.get_marginal_probas(probas_group,
+                                                    return_inv=True)
 
     alpha = cp.Parameter(value=alpha, name="alpha")
     phi = cp.Variable(risk.shape[0], name="phi")
@@ -278,12 +204,136 @@ class LinearPost:
         cp.Maximize(cp.sum(phi) - alpha * cp.sum(psi_pos) * n_examples),
         constraints)
 
+  def perturb_risk(self, risk: np.ndarray) -> np.ndarray:
+    return risk + self.rng.uniform(
+        -self.noise_scale, self.noise_scale, size=risk.shape)
+
   @staticmethod
   def flatten_constraints(
       fairness_constraints: ConstraintType) -> list[tuple[int, int]]:
     return [
         pair for y_c, I in fairness_constraints for pair in product([y_c], I)
     ]
+
+  @staticmethod
+  def get_marginal_probas(probas: np.ndarray,
+                          return_inv: bool = False) -> np.ndarray:
+    marginal_probas = probas.mean(axis=0)
+    if return_inv:
+      # Avoid division by 0
+      mask = marginal_probas == 0
+      marginal_probas[~mask] = 1 / marginal_probas[~mask]
+    return marginal_probas
+
+
+class DecisionCalibratorForLinearPost:
+
+  def __init__(self,
+               fairness_constraints: Optional[ConstraintType] = None,
+               alpha: Optional[float] = None,
+               max_iters_dcal: int = 10,
+               seed: Optional[int] = None) -> None:
+    self.fairness_constraints = fairness_constraints
+    self.alpha = alpha
+    self.max_iters_dcal = max_iters_dcal
+    self.seed = seed
+
+  def fit(self,
+          risk: np.ndarray,
+          probas_group: np.ndarray,
+          groups: np.ndarray,
+          solver: Optional[str] = None,
+          solve_kwargs: Optional[dict[str, Any]] = None,
+          solve_primal: bool = True) -> 'DecisionCalibratorForLinearPost':
+    self.n_classes = risk.shape[1]
+    self.n_groups = probas_group.shape[1]
+    self.multilabel = (groups.ndim == 2) and (groups.shape[1]
+                                              == probas_group.shape[1])
+    n_group_labels = groups.shape[1] if self.multilabel else 1
+
+    self.dcalibs = [
+        DecisionCalibrator(
+            n_actions=self.n_groups if not self.multilabel else 2)
+        for _ in range(n_group_labels)
+    ]
+
+    for _ in range(self.max_iters_dcal):
+      postprocessor = LinearPost(fairness_constraints=self.fairness_constraints,
+                                 alpha=self.alpha,
+                                 noise_scale=0,
+                                 seed=self.seed).fit(risk,
+                                                     probas_group,
+                                                     solver=solver,
+                                                     solve_kwargs=solve_kwargs,
+                                                     solve_primal=solve_primal)
+      # probas_action = postprocessor.pi_ if solve_primal else None
+
+      probas_group_expanded, groups_expanded = self.expand_probas_group_for_dcal(
+          probas_group, groups, multilabel=self.multilabel)
+
+      for i in range(n_group_labels):
+
+        def predict_fn(_, risk, probas_group, postprocessor=postprocessor):
+          return np.eye(self.n_classes)[postprocessor.predict(
+              risk, probas_group)]
+
+        # Step dcalib and transform/calibrate probas_group
+        probas_group_one = self.dcalibs[i].add_(
+            probas_group_expanded[:, i],
+            groups_expanded[:, i],
+            predict_fn,
+            # probas_action=probas_action,
+            risk=risk,
+            probas_group=probas_group)
+
+        # One-step calibrated probas_group
+        probas_group_expanded[:, i] = probas_group_one
+      probas_group = self.squeeze_probas_group_expanded_for_dcal(
+          probas_group_expanded, multilabel=self.multilabel)
+
+    return self
+
+  def transform(self, risk, probas_group):
+    probas_group = probas_group.copy()
+    # for t in range(self.max_iters_dcal):
+    for t in range(len(self.dcalibs[0].adjustments_)):
+      probas_group_expanded = self.expand_probas_group_for_dcal(
+          probas_group, multilabel=self.multilabel)
+      for i, dcalib in enumerate(self.dcalibs):
+        probas_group_expanded[:, i] = dcalib.apply_(
+            probas_group_expanded[:, i], dcalib.adjustments_[t],
+            dcalib.predict_fns_[t](probas_group_expanded[:, i],
+                                   risk=risk,
+                                   probas_group=probas_group))
+      probas_group = self.squeeze_probas_group_expanded_for_dcal(
+          probas_group_expanded, multilabel=self.multilabel)
+    return probas_group
+
+  @staticmethod
+  def expand_probas_group_for_dcal(probas_group, groups=None, multilabel=False):
+    if multilabel:
+      probas_group_expanded = np.stack([1 - probas_group, probas_group],
+                                       axis=-1)
+      # probas_group_expanded.shape = (n_examples, n_groups, 2)
+      # groups.shape = (n_examples, n_groups)
+    else:
+      probas_group_expanded = probas_group[:, None, :]
+      # probas_group_expanded.shape = (n_examples, 1, n_groups)
+      if groups is not None:
+        groups = groups[:, None]  # shape = (n_examples, 1)
+    if groups is not None:
+      return probas_group_expanded, groups
+    else:
+      return probas_group_expanded
+
+  @staticmethod
+  def squeeze_probas_group_expanded_for_dcal(probas_group_expanded,
+                                             multilabel=False):
+    return (probas_group_expanded[:, :, 1]
+            if multilabel else probas_group_expanded[:, 0])
+
+
+# Instantiations
 
 
 class LinearPostSimple:
@@ -298,7 +348,7 @@ class LinearPostSimple:
                class_weight: Optional[list[float]] = None,
                alpha: Optional[float] = None,
                max_iters_dcal: int = 10,
-               noise_mult: float = 1e-4,
+               noise_scale: Optional[float] = None,
                seed: Optional[int] = None) -> None:
 
     # TODO: allow customizing the loss function, default here is 0/1 loss
@@ -322,7 +372,7 @@ class LinearPostSimple:
             remove_unused=remove_unused),
         alpha=alpha,
         max_iters_dcal=max_iters_dcal,
-        noise_mult=noise_mult,
+        noise_scale=noise_scale,
         seed=seed,
     )
 
@@ -332,6 +382,8 @@ class LinearPostSimple:
           p_ay_x: Optional[np.ndarray] = None,
           groups: Optional[np.ndarray] = None,
           labels_ay: Optional[np.ndarray] = None,
+          idx_post: Optional[np.ndarray] = None,
+          idx_dcal: Optional[np.ndarray] = None,
           solver: Optional[str] = None,
           solve_kwargs: Optional[dict[str, Any]] = None,
           solve_primal: bool = True) -> 'LinearPostSimple':
@@ -341,6 +393,8 @@ class LinearPostSimple:
                                           p_ay_x=p_ay_x,
                                           groups=groups,
                                           labels_ay=labels_ay),
+        idx_post=idx_post,
+        idx_dcal=idx_dcal,
         solver=solver,
         solve_kwargs=solve_kwargs,
         solve_primal=solve_primal,
@@ -450,7 +504,6 @@ class LinearPostSimple:
 
 
 class LinearPostOverlapping(LinearPostSimple):
-  # TODO: check if it works with decision calibration
   # p_s_x.shape = [n_examples, 2**n_groups_overlap]
   # p_sy_x.shape = [n_examples, 2**n_groups_overlap, n_classes]
 
@@ -469,7 +522,7 @@ class LinearPostOverlapping(LinearPostSimple):
       remove_unused: bool = False,
       class_weight: Optional[list[float]] = None,
       alpha: Optional[float] = None,
-      noise_mult: float = 1e-4,
+      noise_scale: Optional[float] = None,
       seed: Optional[int] = None) -> None:
     self.n_groups_overlap = n_groups_overlap = n_groups
     self.ways = list(range(1, n_groups_overlap + 1)) if ways == 'all' else ways
@@ -480,7 +533,7 @@ class LinearPostOverlapping(LinearPostSimple):
         remove_unused=remove_unused,
         class_weight=class_weight,
         alpha=alpha,
-        noise_mult=noise_mult,
+        noise_scale=noise_scale,
         seed=seed,
     )
 
@@ -498,7 +551,10 @@ class LinearPostOverlapping(LinearPostSimple):
   def get_risk_and_group_probas_(self,
                                  p_a_x: Optional[np.ndarray] = None,
                                  p_y_x: Optional[np.ndarray] = None,
-                                 p_ay_x: Optional[np.ndarray] = None):
+                                 p_ay_x: Optional[np.ndarray] = None,
+                                 groups: Optional[np.ndarray] = None,
+                                 labels_ay: Optional[np.ndarray] = None):
+    # TODO: doesn't work with decision calibration yet
     if p_y_x is None:
       assert p_ay_x is not None, 'p_y_x or p_ay_x must be provided'
       p_y_x = p_ay_x.reshape(-1, 2**self.n_groups_overlap,

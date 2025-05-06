@@ -19,7 +19,9 @@ def main():
   cache_fnames = args.cache_fname
   criteria = args.criteria
   n_alphas = args.n_alphas
+  dcal = args.dcal
   iters_dcal = args.iters_dcal
+  split_ratio_dcal = args.split_ratio_dcal
   seed = args.seed
   results_dir = args.results_dir
   val_split = args.val_split
@@ -46,13 +48,13 @@ def main():
 
     print(f"Working on {cache_fname}" +
           (f" with {iters_dcal} decision calibration iteration(s)"
-           if iters_dcal else ""))
+           if dcal else ""))
 
     for criterion in criteria:
 
       ## Init (or load existing) metric loggers
 
-      result_fname = f"{{split}}_{cache_fname_base}_{criterion}_linearpost{'_dcal'+str(iters_dcal) if iters_dcal else ''}.csv"
+      result_fname = f"{{split}}_{cache_fname_base}_{criterion}_linearpost{'_dcal'+str(iters_dcal) if dcal else ''}.csv"
       result_path = os.path.join(results_dir, result_fname)
       loggers = {}
       for split in eval_splits:
@@ -112,6 +114,16 @@ def main():
       ## Post-process with LinearPost
 
       for alpha in alphas:
+
+        if dcal and split_ratio_dcal is not None:
+          n_dcal = (int(len(D_cache.split['post']) *
+                        split_ratio_dcal) if dcal else 0)
+          idx_dcal = np.arange(n_dcal)
+          idx_post = np.arange(n_dcal, len(D_cache.split['post']))
+        else:
+          idx_dcal = None
+          idx_post = None
+
         postprocessor = LinearPostSimple(
             n_classes=n_classes,
             n_groups=n_groups,
@@ -126,6 +138,8 @@ def main():
             groups=D_cache.split['post']['groups'] if iters_dcal else None,
             labels_ay=(D_cache.split['post']['labels_ay']
                        if iters_dcal else None),
+            idx_post=idx_post,
+            idx_dcal=idx_dcal,
             solver=solver,
             solve_primal=True,
         )
@@ -171,7 +185,9 @@ def parse_args():
       choices=["sp", "tpr", "fpr", "eo"],
   )
   parser.add_argument('--n_alphas', type=int, default=16)
-  parser.add_argument('--iters_dcal', type=int, default=0)
+  parser.add_argument("--dcal", action='store_true', default=False)
+  parser.add_argument('--iters_dcal', type=int, default=10)
+  parser.add_argument('--split_ratio_dcal', type=float, default=None)
 
   parser.add_argument("--seed", type=int, default=33)
 
