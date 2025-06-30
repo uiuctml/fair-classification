@@ -3,10 +3,37 @@ from itertools import combinations, product
 
 import numpy as np
 import cvxpy as cp
+import torch
 
 from .models import DecisionCalibrator
 
 ConstraintType = list[tuple[int, list[int]]]
+
+
+def sum_(x, axis=None, keepdims=False):
+  if isinstance(x, cp.Expression):
+    return cp.sum(x, axis=axis, keepdims=keepdims)
+  elif isinstance(x, np.ndarray):
+    return np.sum(x, axis=axis, keepdims=keepdims)
+  elif isinstance(x, torch.Tensor):
+    return torch.sum(x, dim=axis, keepdim=keepdims)
+  raise NotImplementedError
+
+
+def multiply_(x, y):
+  if isinstance(x, cp.Expression) or isinstance(y, cp.Expression):
+    return cp.multiply(x, y)
+  return x * y
+
+
+def reciprocal_(x, eps=1e-6):
+  # replace all |x| ≤ eps with zero
+  y = 1 / x
+  if isinstance(x, torch.Tensor):
+    mask = (torch.abs(x) > eps).detach()
+  else:
+    mask = (np.abs(x) > eps).astype(bool)
+  return y * mask
 
 
 class LinearPost:
@@ -38,7 +65,8 @@ class LinearPost:
           idx_dcal: Optional[np.ndarray] = None,
           solver: Optional[str] = None,
           solve_kwargs: Optional[dict[str, Any]] = None,
-          solve_primal: bool = True) -> 'LinearPost':
+          solve_primal: bool = True,
+          warmstart_pi: cp.Variable | None = None) -> 'LinearPost':
     solve_kwargs = solve_kwargs or {}
 
     if sample_weight is None:
@@ -90,7 +118,8 @@ class LinearPost:
               sample_weight=sample_weight[idx_post],
               solver=solver,
               solve_kwargs=solve_kwargs,
-              solve_primal=solve_primal)
+              solve_primal=solve_primal,
+              warmstart_pi=warmstart_pi)
     return self
 
   def fit_(self,
@@ -99,12 +128,16 @@ class LinearPost:
            sample_weight: np.ndarray,
            solver: Optional[str] = None,
            solve_kwargs: Optional[dict[str, Any]] = None,
-           solve_primal: bool = True) -> None:
+           solve_primal: bool = True,
+           warmstart_pi: cp.Variable | None = None) -> None:
     self.n_psi = sum(len(I) for _, I in self.fairness_constraints)
 
     if solve_primal:
-      problem = self.linprog_primal_(risk, probas_group, self.alpha,
-                                     sample_weight)
+      problem = self.linprog_primal_(risk,
+                                     probas_group,
+                                     self.alpha,
+                                     sample_weight,
+                                     warmstart_pi=warmstart_pi)
       problem.solve(solver=solver, **solve_kwargs)
       if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
         raise cp.SolverError(
@@ -153,16 +186,58 @@ class LinearPost:
     fair_risk = self.predict_score(risk, probas_group)
     return np.argmin(fair_risk, axis=1)
 
-  def linprog_primal_(self, risk: np.ndarray, probas_group: np.ndarray,
-                      alpha: float, sample_weight: np.ndarray) -> cp.Problem:
+  def dist_fn(self, pi, probas_group, sample_weight=None):
+    if sample_weight is not None:
+      w = sum_(sample_weight)
+      marginals_group = sum_(probas_group * sample_weight[:, None], axis=0) / w
+      probas_group = probas_group * sample_weight[:,
+                                                  None]  # / w  # accounted for below in `constraints.append(t / w)`
+    else:
+      w = probas_group.shape[0]
+      marginals_group = sum_(probas_group, axis=0) / probas_group.shape[0]
+
+    # Get constraints
+    dists = []
+
+    # | sum_x gamma(x, k) * pi(x, y_c) * p(x) - q_c | <= alpha / 2, for all c, k
+    gamma = probas_group / marginals_group
+    for y_c, I in self.fairness_constraints:
+      t = sum_(multiply_(gamma[:, I], pi[:, y_c, None]), axis=0)
+      dists.append(t / w)
+
+    return dists
+
+  def cons_fn(self, pi, probas_group, sample_weight=None):
+    dists = self.dist_fn(pi, probas_group, sample_weight)
+    diffs = []
+    for i in range(len(dists)):
+      dist = dists[i]
+      diff = dist[:, None] - dist[None, :]
+      # take non-diagonal elements
+      if isinstance(diff, torch.Tensor):
+        mask = torch.eye(diff.shape[0], dtype=torch.bool, device=diff.device)
+      else:
+        mask = np.eye(diff.shape[0], dtype=bool)
+      diff = diff[~mask].flatten()
+      diffs.append(diff)
+    return diffs
+
+  def linprog_primal_(self,
+                      risk: np.ndarray,
+                      probas_group: np.ndarray,
+                      alpha: float,
+                      sample_weight: np.ndarray,
+                      warmstart_pi: cp.Variable | None = None) -> cp.Problem:
     n_constraints = len(self.fairness_constraints)
-    gamma = probas_group * self.get_marginal_probas(
-        probas_group, sample_weight=sample_weight, return_inv=True)
+    # gamma = probas_group * self.get_marginal_probas(
+    #     probas_group, sample_weight=sample_weight, return_inv=True)
     w = sample_weight.sum()
 
     alpha = cp.Parameter(value=alpha, name="alpha")
-    pi = cp.Variable((risk.shape[0], self.n_classes), name="pi", nonneg=True)
     q = cp.Variable(n_constraints, name="q", nonneg=True)
+    pi = cp.Variable((risk.shape[0], self.n_classes), name="pi", nonneg=True)
+    if warmstart_pi is not None:
+      pi.value = warmstart_pi
 
     # Get constraints
     constraints = []
@@ -171,11 +246,16 @@ class LinearPost:
     constraints.append(cp.sum(pi, axis=1) == 1)
 
     # | sum_x gamma(x, k) * pi(x, y_c) * p(x) - q_c | <= alpha / 2, for all c, k
-    for c, (y_c, I) in enumerate(self.fairness_constraints):
-      for k in I:
-        t = cp.sum(cp.multiply(gamma[:, k] * sample_weight, pi[:, y_c]))
-        constraints.append(-alpha * w / 2 <= t - q[c] * w)
-        constraints.append(t - q[c] * w <= alpha * w / 2)
+    # for c, (y_c, I) in enumerate(self.fairness_constraints):
+    #   for k in I:
+    #     t = cp.sum(cp.multiply(gamma[:, k] * sample_weight, pi[:, y_c]))
+    #     constraints.append(-alpha * w / 2 <= t - q[c] * w)
+    #     constraints.append(t - q[c] * w <= alpha * w / 2)
+    for c, dist_group in enumerate(self.dist_fn(pi, probas_group,
+                                                sample_weight)):
+      for dist in dist_group:
+        constraints.append(-alpha * w / 2 <= dist * w - q[c] * w)
+        constraints.append(dist * w - q[c] * w <= alpha * w / 2)
 
     return cp.Problem(
         cp.Minimize(cp.sum(cp.multiply(pi, risk * sample_weight[:, None]))),
@@ -245,6 +325,112 @@ class LinearPost:
       mask = marginal_probas == 0
       marginal_probas[~mask] = 1 / marginal_probas[~mask]
     return marginal_probas
+
+
+class LinearPostWeighted(LinearPost):
+  # constraints[c] is a tuple (y_c, list of groups), specifiying the
+  # requirement that:
+  #   | Pr[ h(X) = y_c | Z_k = 1 ] - Pr[ h(X) = y_c | Z_k' = 1 ] | <= alpha / 2
+  # for all k, k' in the list of groups
+
+  def fit_(self,
+           risk: np.ndarray,
+           probas_group: np.ndarray,
+           sample_weight: np.ndarray,
+           solver: Optional[str] = None,
+           solve_kwargs: Optional[dict[str, Any]] = None,
+           solve_primal: bool = True,
+           warmstart_pi: cp.Variable | None = None) -> None:
+    assert solve_primal is True, "Not implemented for dual yet"
+    self.n_psi = sum(len(I) for _, I in self.fairness_constraints)
+
+    if solve_primal:
+      problem = self.linprog_primal_(risk,
+                                     probas_group,
+                                     self.alpha,
+                                     sample_weight,
+                                     warmstart_pi=warmstart_pi)
+      problem.solve(solver=solver, **solve_kwargs)
+      if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+        raise cp.SolverError(
+            f"Solver failed: {problem.status}, {problem.solver_stats}")
+      self.psi_ = (np.array([
+          c.dual_value for c in problem.constraints[-2 * self.n_psi::2]
+      ]) - np.array(
+          [c.dual_value for c in problem.constraints[-2 * self.n_psi + 1::2]]))
+      self.phi_ = -problem.constraints[0].dual_value
+      self.pi_ = problem.var_dict['pi'].value
+    else:
+      raise NotImplementedError
+
+    marginals_group = self.get_marginal_probas(probas_group,
+                                               sample_weight=sample_weight)
+    self.w_ = np.zeros((self.n_classes, self.n_groups))
+
+    i = 0
+    for y_c, I in self.fairness_constraints:
+      for k in I:
+        self.w_[y_c, k] -= self.psi_[i]
+        self.w_[y_c, I] += (self.psi_[i] /
+                            np.sum(marginals_group[I] / marginals_group[k]))
+        i += 1
+
+    self.score_ = problem.value
+    self.risk_ = risk  # for debugging
+    self.probas_group_ = probas_group  # for debugging
+
+  def cons_fn(self, pi, probas_group, sample_weight=None):
+    if sample_weight is not None:
+      w = sum_(sample_weight)
+      marginals_group = sum_(probas_group * sample_weight[:, None],
+                             axis=0)  # / w  # no need for normalization here
+      probas_group = probas_group * sample_weight[:,
+                                                  None]  # / w  # accounted for below in `constraints.append(t / w)`
+    else:
+      w = probas_group.shape[0]
+      marginals_group = sum_(probas_group, axis=0)  # / probas_group.shape[0]
+
+    # Get constraints
+    constraints = []
+
+    # | sum_x gamma(x, k) * pi(x, y_c) * p(x) - q_c | <= alpha / 2, for all c, k
+    for y_c, I in self.fairness_constraints:
+      s = sum_(probas_group[:, I], axis=1,
+               keepdims=True) * (marginals_group[I] / sum_(marginals_group[I]))
+      # s.shape = [n_examples, n_groups_in_I]
+      t = sum_(multiply_(probas_group[:, I] - s, pi[:, y_c, None]), axis=0)
+      constraints.append(t / w)
+
+    return constraints
+
+  def linprog_primal_(self,
+                      risk: np.ndarray,
+                      probas_group: np.ndarray,
+                      alpha: float,
+                      sample_weight: np.ndarray,
+                      warmstart_pi: cp.Variable | None = None) -> cp.Problem:
+    w = sample_weight.sum()
+
+    alpha = cp.Parameter(value=alpha, name="alpha")
+    pi = cp.Variable((risk.shape[0], self.n_classes), name="pi", nonneg=True)
+    if warmstart_pi is not None:
+      pi.value = warmstart_pi
+
+    # Get constraints
+    constraints = []
+
+    # sum_y pi(x, y) = 1, for all x
+    constraints.append(cp.sum(pi, axis=1) == 1)
+
+    # # # | sum_x gamma(x, k) * pi(x, y_c) * p(x) - q_c | <= alpha / 2, for all c, k
+    for cons_group in self.cons_fn(pi, probas_group, sample_weight):
+      for cons in cons_group:
+        constraints.append(-alpha * w <= cons * w)
+        constraints.append(cons * w <= alpha * w)
+
+    return cp.Problem(
+        cp.Minimize(cp.sum(cp.multiply(pi, risk * sample_weight[:, None]))),
+        constraints)
 
 
 class DecisionCalibratorForLinearPost:

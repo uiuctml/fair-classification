@@ -7,30 +7,37 @@ sys.path.append('..')
 import torch
 import numpy as np
 
+from sklearn.base import BaseEstimator
 from sklearn.linear_model import LogisticRegression
+from sklearn.calibration import CalibratedClassifierCV
 from lightgbm import LGBMClassifier
 from linearpost.models import MLPClassifier
 
 import step0_get_datasets
 
 
-class KeepUnseenLabels:
+class KeepUnseenLabels(BaseEstimator):
 
   def __init__(self, clf, n_classes=None):
     self.clf = clf
     self.n_classes = n_classes
+    self.classes_ = np.arange(n_classes)
 
-  def fit(self, X, y):
+  def fit(self, X, y, sample_weight=None):
     if self.n_classes is None:
       self.n_classes = np.max(y) + 1
-    self.clf.fit(X, y)
+    self.clf.fit(X, y, sample_weight=sample_weight)
     self.seen_classes = np.unique(y)
+    self.is_fitted_ = True
     return self
 
   def predict_proba(self, X):
     y = np.zeros((X.shape[0], self.n_classes))
     y[:, self.seen_classes] = self.clf.predict_proba(X)
     return y
+
+  def predict(self, X):
+    return self.predict_proba(X).argmax(axis=1)
 
 
 def get_model(name, n_classes=None, device=None, seed=None):
@@ -62,6 +69,8 @@ def main():
   dataset_getter_names = args.dataset_getter_name
   attr_aware = args.attr_aware
   models = args.model
+  pre_split = args.pre_split
+  cal_method = args.cal_method
   cache_pre = args.cache_pre
   cache_dir = args.cache_dir
   seed = args.seed
@@ -72,7 +81,10 @@ def main():
 
   for dataset_getter_name in dataset_getter_names:
     for model in models:
-      cache_fname = f"{dataset_getter_name}_{model}.pickle"
+      cache_fname = f"{dataset_getter_name}_{model}"
+      if cal_method is not None:
+        cache_fname += f"_{cal_method}"
+      cache_fname += '.pickle'
       cache_path = os.path.join(cache_dir, cache_fname)
 
       print(
@@ -91,7 +103,7 @@ def main():
         n_classes = D.features['labels'].n_categories
         n_groups = D.features['groups'].n_categories
 
-        ## Get and train model
+        ## Get model
 
         D['labels_ay'] = D['groups'] * n_classes + D['labels']
         if attr_aware:
@@ -103,18 +115,28 @@ def main():
           label_column = 'labels_ay'
           n_targets = n_classes * n_groups
 
+        ## Train model
+
         predictor = get_model(model,
                               n_classes=n_targets,
                               device=device,
                               seed=seed)
-        predictor.fit(D.split['pre']['X'], D.split['pre'][label_column])
+        if cal_method is not None:
+          predictor = CalibratedClassifierCV(
+              estimator=predictor,
+              method=cal_method,
+          )
+
+        predictor.fit(D.split[pre_split]['X'], D.split[pre_split][label_column])
 
         ## Get predictions
 
         if not cache_pre:
           # Get a subset of D that excludes the pre-train split
-          splits = [k for k in D.split.keys() if not k.startswith('pre')]
-          D_cache = D.split[splits]
+          splits_to_keep = [
+              k for k in D.split.keys() if not k.startswith('pre')
+          ]
+          D_cache = D.split[splits_to_keep]
         else:
           D_cache = D
 
@@ -162,6 +184,12 @@ def parse_args():
       required=True,
       choices=["logreg", "lgbm", "mlp"],
   )
+
+  parser.add_argument("--pre_split", type=str, default="pre")
+  parser.add_argument("--cal_method",
+                      type=str,
+                      default=None,
+                      choices=['sigmoid', 'isotonic'])
 
   parser.add_argument('--cache_pre', action='store_true', default=False)
   parser.add_argument("--cache_dir", type=str, default="cache")

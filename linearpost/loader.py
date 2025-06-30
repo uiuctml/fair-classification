@@ -2,6 +2,10 @@
 For tabular datasets, it is important to "Mark categorical columns" in order for
 dataset.Dataset.preprocess_tabular to recognize and one-hot encode them.
 '''
+'''
+how to add a new loader:
+
+'''
 
 import csv
 import os
@@ -16,14 +20,24 @@ import pandas as pd
 
 import folktables
 
-from .dataset import Dataset, Array, Categorical, Multilabel
+from .dataset import Feature, Dataset, Array, Categorical, Multilabel
 
 
 def dataset_from_loader_outputs(outputs) -> Dataset:
   # data will be treated as input X
   # labels: ndarray will be treated as class labels
   # groups: ndarray will be treated as sensitive attribute
-  data = {'X': outputs['data'], 'labels': outputs['labels']}
+  known_keys = [
+      'data', 'labels', 'groups', 'split_idx', 'splits', 'column_names',
+      'category_names', 'label_names', 'group_names'
+  ]
+  data = {
+      'X': outputs['data'],
+      'labels': outputs['labels'],
+      **{
+          k: outputs[k] for k in outputs if k not in known_keys
+      }
+  }
   features = {
       'X':
           Array(column_names=outputs['column_names']
@@ -32,7 +46,10 @@ def dataset_from_loader_outputs(outputs) -> Dataset:
                 if 'category_names' in outputs else None),
       'labels':
           Categorical(n_categories=len(outputs['label_names']),
-                      category_names=outputs['label_names'])
+                      category_names=outputs['label_names']),
+      **{
+          k: Feature() for k in outputs if k not in known_keys
+      }
   }
   if 'groups' in outputs:
     data['groups'] = outputs['groups']
@@ -173,13 +190,25 @@ def adult(data_dir, sensitive_attr='sex'):
   }
 
 
-def acsincome(data_dir, n_classes=2, sensitive_attr='SEX'):
+acs_states = [
+    "AK", "AL", "AR", "AZ", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA",
+    "ID", "IL", "IN", "KS", "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO",
+    "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM", "NV", "NY", "OH", "OK",
+    "OR", "PA", "PR", "RI", "SC", "SD", "TN", "TX", "UT", "VA", "VT", "WA",
+    "WI", "WV", "WY"
+]
+
+
+def acsincome(data_dir,
+              n_classes=2,
+              sensitive_attr='SEX',
+              survey_years=['2018']):
   # PINCP: Total person's income (will be binned into n_classes bins)
   target = 'PINCP'
   # Features to keep
   features = [
       'AGEP', 'COW', 'SCHL', 'MAR', 'OCCP', 'POBP', 'RELP', 'WKHP', 'SEX',
-      'RAC1P'
+      'RAC1P', 'ST'
   ]
 
   # Download and parse dataset description
@@ -207,28 +236,39 @@ def acsincome(data_dir, n_classes=2, sensitive_attr='SEX'):
           k = int(k) if not 'b' in k else -1
           category_names[row[1]][k] = row[-1]
 
-  # Download data via folktables
-  df_raw = folktables.adult_filter(
-      folktables.ACSDataSource(
-          survey_year='2018',
-          horizon='1-Year',
-          survey='person',
-          root_dir=data_dir,
-      ).get_data(download=True))
-  df, targets, groups = folktables.BasicProblem(
-      features=features,
-      target=target,
-      group=sensitive_attr,
-      postprocess=lambda x: np.nan_to_num(x, nan=-1)).df_to_pandas(df_raw)
+  dfs = []
+  targets = []
+  groups = []
+  years = []
+  for year in survey_years:
+    # Download data via folktables
+    df_raw = folktables.ACSDataSource(
+        survey_year=str(year),
+        horizon='1-Year',
+        survey='person',
+        root_dir=data_dir,
+    ).get_data(download=True)
+    d, t, g = folktables.BasicProblem(
+        features=features,
+        target=target,
+        group=sensitive_attr,
+        postprocess=lambda x: np.nan_to_num(x, nan=-1)).df_to_pandas(
+            folktables.adult_filter(df_raw))
+    dfs.append(d)
+    targets.append(t.values.flatten())
+    groups.append(g.values.flatten())
+    years.extend([year] * len(t))
+  df = pd.concat(dfs, ignore_index=True)
+  targets = np.concatenate(targets)
+  groups = np.concatenate(groups)
+  years = np.array(years)
 
   # df only contains integer-like values
   df = df.astype(int)
 
-  groups = groups.values.flatten()
   group_names, groups = np.unique(groups, return_inverse=True)
   group_names = [category_names[sensitive_attr][v] for v in group_names]
 
-  targets = targets.values.flatten()
   if n_classes == 2:
     # Binarize PINCP into two classes: <=50K and >50K
     label_names = ["<=50K", ">50K"]
@@ -252,8 +292,15 @@ def acsincome(data_dir, n_classes=2, sensitive_attr='SEX'):
   df[categotical_columns] = df[categotical_columns].apply(
       lambda x: x.astype('category'))
 
+  # State of the examples
+  states = np.array(
+      list(map(lambda x: category_names['ST'][x].split('/')[-1], df['ST'])))
+  df.drop(['ST'], inplace=True, axis=1)
+
   return {
       'data': df,
+      'states': states,
+      'years': years,
       'labels': labels,
       'groups': groups,
       'label_names': label_names,
