@@ -29,11 +29,11 @@ class LinearPost:
     self.rng = np.random.default_rng(seed)
     self.dcalib: Optional[DecisionCalibratorForLinearPost] = None
 
-  # TODO: sample weight
   def fit(self,
           risk: np.ndarray,
           probas_group: np.ndarray,
           groups: Optional[np.ndarray] = None,
+          sample_weight: Optional[np.ndarray] = None,
           idx_post: Optional[np.ndarray] = None,
           idx_dcal: Optional[np.ndarray] = None,
           solver: Optional[str] = None,
@@ -41,6 +41,8 @@ class LinearPost:
           solve_primal: bool = True) -> 'LinearPost':
     solve_kwargs = solve_kwargs or {}
 
+    if sample_weight is None:
+      sample_weight = np.ones(risk.shape[0])
     if idx_post is None:
       idx_post = np.arange(risk.shape[0])
     if idx_dcal is None:
@@ -73,16 +75,19 @@ class LinearPost:
           fairness_constraints=self.fairness_constraints,
           alpha=self.alpha,
           max_iters_dcal=self.max_iters_dcal,
-          seed=self.seed).fit(self.perturb_risk(risk_orig[idx_dcal]),
-                              probas_group[idx_dcal],
-                              groups[idx_dcal],
-                              solver=solver,
-                              solve_kwargs=solve_kwargs,
-                              solve_primal=solve_primal)
+          seed=self.seed).fit(
+              self.perturb_risk(risk_orig[idx_dcal]),
+              probas_group[idx_dcal],
+              groups[idx_dcal],
+              # sample_weight=sample_weight[idx_dcal],  # TODO
+              solver=solver,
+              solve_kwargs=solve_kwargs,
+              solve_primal=solve_primal)
       probas_group = self.dcalib.transform(risk, probas_group)
 
     self.fit_(risk[idx_post],
               probas_group[idx_post],
+              sample_weight=sample_weight[idx_post],
               solver=solver,
               solve_kwargs=solve_kwargs,
               solve_primal=solve_primal)
@@ -91,15 +96,19 @@ class LinearPost:
   def fit_(self,
            risk: np.ndarray,
            probas_group: np.ndarray,
+           sample_weight: np.ndarray,
            solver: Optional[str] = None,
            solve_kwargs: Optional[dict[str, Any]] = None,
            solve_primal: bool = True) -> None:
     self.n_psi = sum(len(I) for _, I in self.fairness_constraints)
 
-    # TODO: catch situations where the solver fails (i.e., numerical issues)
     if solve_primal:
-      problem = self.linprog_primal_(risk, probas_group, self.alpha)
+      problem = self.linprog_primal_(risk, probas_group, self.alpha,
+                                     sample_weight)
       problem.solve(solver=solver, **solve_kwargs)
+      if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+        raise cp.SolverError(
+            f"Solver failed: {problem.status}, {problem.solver_stats}")
       self.psi_ = (np.array([
           c.dual_value for c in problem.constraints[-2 * self.n_psi::2]
       ]) - np.array(
@@ -108,13 +117,18 @@ class LinearPost:
       self.pi_ = problem.var_dict['pi'].value
       self.q_ = problem.var_dict['q'].value
     else:
-      problem = self.linprog_dual_(risk, probas_group, self.alpha)
+      problem = self.linprog_dual_(risk, probas_group, self.alpha,
+                                   sample_weight)
       problem.solve(solver=solver, **solve_kwargs)
+      if problem.status not in (cp.OPTIMAL, cp.OPTIMAL_INACCURATE):
+        raise cp.SolverError(
+            f"Solver failed: {problem.status}, {problem.solver_stats}")
       self.psi_ = problem.var_dict['psi_pos'].value - problem.var_dict[
           'psi_neg'].value
       self.phi_ = problem.var_dict['phi'].value
 
     marginals_group_inv = self.get_marginal_probas(probas_group,
+                                                   sample_weight=sample_weight,
                                                    return_inv=True)
     self.w_ = np.zeros((self.n_classes, self.n_groups))
     for i, (y_c, k) in enumerate(
@@ -140,14 +154,14 @@ class LinearPost:
     return np.argmin(fair_risk, axis=1)
 
   def linprog_primal_(self, risk: np.ndarray, probas_group: np.ndarray,
-                      alpha: float) -> cp.Problem:
-    n_examples = risk.shape[0]
+                      alpha: float, sample_weight: np.ndarray) -> cp.Problem:
     n_constraints = len(self.fairness_constraints)
-    gamma = probas_group * self.get_marginal_probas(probas_group,
-                                                    return_inv=True)
+    gamma = probas_group * self.get_marginal_probas(
+        probas_group, sample_weight=sample_weight, return_inv=True)
+    w = sample_weight.sum()
 
     alpha = cp.Parameter(value=alpha, name="alpha")
-    pi = cp.Variable((n_examples, self.n_classes), name="pi", nonneg=True)
+    pi = cp.Variable((risk.shape[0], self.n_classes), name="pi", nonneg=True)
     q = cp.Variable(n_constraints, name="q", nonneg=True)
 
     # Get constraints
@@ -159,17 +173,19 @@ class LinearPost:
     # | sum_x gamma(x, k) * pi(x, y_c) * p(x) - q_c | <= alpha / 2, for all c, k
     for c, (y_c, I) in enumerate(self.fairness_constraints):
       for k in I:
-        t = cp.sum(cp.multiply(gamma[:, k], pi[:, y_c]))
-        constraints.append(-alpha * n_examples / 2 <= t - q[c] * n_examples)
-        constraints.append(t - q[c] * n_examples <= alpha * n_examples / 2)
+        t = cp.sum(cp.multiply(gamma[:, k] * sample_weight, pi[:, y_c]))
+        constraints.append(-alpha * w / 2 <= t - q[c] * w)
+        constraints.append(t - q[c] * w <= alpha * w / 2)
 
-    return cp.Problem(cp.Minimize(cp.sum(cp.multiply(pi, risk))), constraints)
+    return cp.Problem(
+        cp.Minimize(cp.sum(cp.multiply(pi, risk * sample_weight[:, None]))),
+        constraints)
 
   def linprog_dual_(self, risk: np.ndarray, probas_group: np.ndarray,
-                    alpha: float) -> cp.Problem:
-    n_examples = risk.shape[0]
-    gamma = probas_group * self.get_marginal_probas(probas_group,
-                                                    return_inv=True)
+                    alpha: float, sample_weight: np.ndarray) -> cp.Problem:
+    gamma = probas_group * self.get_marginal_probas(
+        probas_group, sample_weight=sample_weight, return_inv=True)
+    w = sample_weight.sum()
 
     alpha = cp.Parameter(value=alpha, name="alpha")
     phi = cp.Variable(risk.shape[0], name="phi")
@@ -201,8 +217,9 @@ class LinearPost:
     # A factor of `1/2` is omitted, because constraint (*) above already gives
     # sum_k psi_pos_{c, k} = sum_k psi_neg_{c, k}, for all c
     return cp.Problem(
-        cp.Maximize(cp.sum(phi) - alpha * cp.sum(psi_pos) * n_examples),
-        constraints)
+        cp.Maximize(
+            cp.sum(cp.multiply(phi, sample_weight)) -
+            alpha * cp.sum(psi_pos) * w), constraints)
 
   def perturb_risk(self, risk: np.ndarray) -> np.ndarray:
     return risk + self.rng.uniform(
@@ -217,8 +234,12 @@ class LinearPost:
 
   @staticmethod
   def get_marginal_probas(probas: np.ndarray,
+                          sample_weight: Optional[np.ndarray] = None,
                           return_inv: bool = False) -> np.ndarray:
-    marginal_probas = probas.mean(axis=0)
+    if sample_weight is None:
+      sample_weight = np.ones(probas.shape[0])
+    marginal_probas = (probas * sample_weight[:, None]).sum(
+        axis=0) / sample_weight.sum()
     if return_inv:
       # Avoid division by 0
       mask = marginal_probas == 0
@@ -382,6 +403,7 @@ class LinearPostSimple:
           p_ay_x: Optional[np.ndarray] = None,
           groups: Optional[np.ndarray] = None,
           labels_ay: Optional[np.ndarray] = None,
+          sample_weight: Optional[np.ndarray] = None,
           idx_post: Optional[np.ndarray] = None,
           idx_dcal: Optional[np.ndarray] = None,
           solver: Optional[str] = None,
@@ -393,6 +415,7 @@ class LinearPostSimple:
                                           p_ay_x=p_ay_x,
                                           groups=groups,
                                           labels_ay=labels_ay),
+        sample_weight=sample_weight,
         idx_post=idx_post,
         idx_dcal=idx_dcal,
         solver=solver,
@@ -517,7 +540,7 @@ class LinearPostOverlapping(LinearPostSimple):
       self,
       n_classes: int,
       n_groups: int,  # number of overlapping groups
-      ways: list[int] | Literal['all'] = [1],
+      ways: list[int] | Literal['all'] = None,
       fairness_criterion: Literal['sp', 'tpr', 'fpr', 'eo'] = 'sp',
       remove_unused: bool = False,
       class_weight: Optional[list[float]] = None,
@@ -525,6 +548,8 @@ class LinearPostOverlapping(LinearPostSimple):
       noise_scale: Optional[float] = None,
       seed: Optional[int] = None) -> None:
     self.n_groups_overlap = n_groups_overlap = n_groups
+    if ways is None:
+      ways = [1]
     self.ways = list(range(1, n_groups_overlap + 1)) if ways == 'all' else ways
     super().__init__(
         n_classes=n_classes,

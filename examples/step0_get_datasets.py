@@ -9,6 +9,35 @@ import numpy as np
 from linearpost import loader
 
 
+def map_acs_race_to_adult(loader_outputs):
+  # Combine RAC1P categories [3, 4, 5], [6, 7], and [8, 9] into new categories
+  # 9997, 9998, and 9999 resp., due to small sample size in some groups.
+  # This is also consistent with the UCI Adult dataset.
+  category_names = loader_outputs['category_names']
+  category_names['RAC1P'].update({
+      9997: "American Indian or Alaska Native alone",
+      9998: "Asian, Native Hawaiian or Other Pacific Islander alone",
+      9999: "Other"
+  })
+
+  df = loader_outputs['data']
+  df['RAC1P'] = df['RAC1P'].astype(df['RAC1P'].to_numpy().dtype)
+  df['RAC1P'] = df['RAC1P'].replace([3, 4, 5], 9997)
+  df['RAC1P'] = df['RAC1P'].replace([6, 7], 9998)
+  df['RAC1P'] = df['RAC1P'].replace([8, 9], 9999)
+  df['RAC1P'] = df['RAC1P'].astype('category')
+
+  # Get group labels
+  groups = df['RAC1P'].values
+  group_names, groups = np.unique(groups, return_inverse=True)
+  loader_outputs['groups'] = groups
+  loader_outputs['group_names'] = [
+      category_names['RAC1P'][n] for n in group_names
+  ]
+
+  return loader_outputs
+
+
 def get_dataset_xz24_tabular(data_dir_base,
                              dataset_name,
                              remove_sensitive_attr=True,
@@ -49,32 +78,9 @@ def get_dataset_xz24_tabular(data_dir_base,
         n_classes=5,
         sensitive_attr=sensitive_attr,
     )
+    # Merge RAC1P categories according to UCI Adult style
+    loader_outputs = map_acs_race_to_adult(loader_outputs)
     split_sizes = [0.5, 0.1, 0.1, 0.3]
-
-    # Combine RAC1P categories [3, 4, 5], [6, 7], and [8, 9] into new categories
-    # 9997, 9998, and 9999 resp., due to small sample size in some groups.
-    # This is also consistent with the UCI Adult dataset.
-    category_names = loader_outputs['category_names']
-    category_names['RAC1P'].update({
-        9997: "American Indian or Alaska Native alone",
-        9998: "Asian, Native Hawaiian or Other Pacific Islander alone",
-        9999: "Other"
-    })
-
-    df = loader_outputs['data']
-    df['RAC1P'] = df['RAC1P'].astype(df['RAC1P'].to_numpy().dtype)
-    df['RAC1P'] = df['RAC1P'].replace([3, 4, 5], 9997)
-    df['RAC1P'] = df['RAC1P'].replace([6, 7], 9998)
-    df['RAC1P'] = df['RAC1P'].replace([8, 9], 9999)
-    df['RAC1P'] = df['RAC1P'].astype('category')
-
-    # Get group labels
-    groups = df['RAC1P'].values
-    group_names, groups = np.unique(groups, return_inverse=True)
-    loader_outputs['groups'] = groups
-    loader_outputs['group_names'] = [
-        category_names['RAC1P'][n] for n in group_names
-    ]
 
   else:
     raise NotImplementedError

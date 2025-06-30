@@ -14,13 +14,36 @@ from linearpost.models import MLPClassifier
 import step0_get_datasets
 
 
-def get_model(name, device=None, seed=None):
+class KeepUnseenLabels:
+
+  def __init__(self, clf, n_classes=None):
+    self.clf = clf
+    self.n_classes = n_classes
+
+  def fit(self, X, y):
+    if self.n_classes is None:
+      self.n_classes = np.max(y) + 1
+    self.clf.fit(X, y)
+    self.seen_classes = np.unique(y)
+    return self
+
+  def predict_proba(self, X):
+    y = np.zeros((X.shape[0], self.n_classes))
+    y[:, self.seen_classes] = self.clf.predict_proba(X)
+    return y
+
+
+def get_model(name, n_classes=None, device=None, seed=None):
   if name == 'logreg':
-    return LogisticRegression(max_iter=10000, random_state=seed)
+    return KeepUnseenLabels(LogisticRegression(max_iter=10000,
+                                               random_state=seed),
+                            n_classes=n_classes)
   elif name == 'lgbm':
-    return LGBMClassifier(random_state=seed, verbosity=0)
+    return KeepUnseenLabels(LGBMClassifier(random_state=seed, verbosity=0),
+                            n_classes=n_classes)
   elif name == 'mlp':
     return MLPClassifier(
+        n_classes=n_classes,
         hidden_layer_sizes=(500, 200, 100),
         n_epochs=20,
         batch_size=128,
@@ -80,14 +103,18 @@ def main():
           label_column = 'labels_ay'
           n_targets = n_classes * n_groups
 
-        predictor = get_model(model, device=device, seed=seed)
+        predictor = get_model(model,
+                              n_classes=n_targets,
+                              device=device,
+                              seed=seed)
         predictor.fit(D.split['pre']['X'], D.split['pre'][label_column])
 
         ## Get predictions
 
         if not cache_pre:
           # Get a subset of D that excludes the pre-train split
-          D_cache = D.split[['post', 'val', 'test']]
+          splits = [k for k in D.split.keys() if not k.startswith('pre')]
+          D_cache = D.split[splits]
         else:
           D_cache = D
 

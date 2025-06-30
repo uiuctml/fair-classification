@@ -5,6 +5,7 @@ import pickle
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
+import torch
 from torch.utils.data import DataLoader
 from torch import Tensor
 
@@ -32,6 +33,41 @@ class Multilabel(Feature):
 class Array(Feature):
   column_names: Optional[dict[str, str]] = None
   category_names: Optional[dict[str, dict[str, str]]] = None
+
+
+def concatenate(datasets) -> 'Dataset':
+  data = {}
+  features = {}
+  split_idx = {}
+  length = 0
+  for _, dataset in enumerate(datasets):
+    for k, v in dataset.split_idx.items():
+      v = np.array(v) + length
+      if k not in split_idx:
+        split_idx[k] = v
+      else:
+        split_idx[k] = np.concatenate([split_idx[k], v])
+    for k, v in dataset.features.items():
+      if k not in features:
+        features[k] = v
+      else:
+        features[k].metadata.update(v.metadata)
+    for k, v in dataset.data.items():
+      if k not in data:
+        data[k] = v
+      else:
+        if isinstance(v, pd.DataFrame):
+          data[k] = pd.concat([data[k], v], axis=0, ignore_index=True)
+        elif isinstance(v, np.ndarray):
+          data[k] = np.concatenate([data[k], v], axis=0)
+        elif isinstance(v, Tensor):
+          data[k] = torch.cat([data[k], v], dim=0)
+        elif isinstance(v, list):
+          data[k].extend(v)
+        else:
+          raise NotImplementedError
+    length += len(dataset)
+  return Dataset(data=data, features=features, split_idx=split_idx)
 
 
 class Dataset:
@@ -136,6 +172,9 @@ class Dataset:
 
     def __init__(self, dataset: 'Dataset'):
       self.dataset = dataset
+
+    def keys(self) -> list[str]:
+      return list(self.dataset.split_idx.keys())
 
     def __contains__(self, split_name: str) -> bool:
       return split_name in self.dataset.split_idx

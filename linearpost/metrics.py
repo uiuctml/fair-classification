@@ -16,7 +16,7 @@ from .utils import edgewise_simplex_subdivision
 def bootstrap_std_error(
     metric_fn: Callable[..., float]
 ) -> Callable[..., Tuple[float] | Tuple[float, float]]:
-  """Wraps a metric function to compute bootstrap standard error if requested."""
+  """Wraps a metric function to compute bootstrap standard error."""
 
   def wrapped(*args,
               return_std_err: bool = False,
@@ -54,7 +54,11 @@ def output_dists(y_preds, groups, n_classes, n_groups):
       np.bincount(y_preds[groups == a], minlength=n_classes)
       for a in range(n_groups)
   ])
-  dists = pred_counts / group_counts[:, None]  # shape = (n_groups, n_classes)
+  with np.errstate(invalid='ignore'):
+    dists = np.nan_to_num(pred_counts / group_counts[:, None], nan=0.0)
+    # shape = (n_groups, n_classes)
+  # dists[a, y] is Pr[y_pred = y | group = a]
+  # p[a] of second return value is Pr[group = a]
   return (dists, group_counts / group_counts.sum())
 
 
@@ -68,22 +72,39 @@ def confusion_matrix(y_true, y_preds, groups, n_classes, n_groups):
   g_y_counts = cm.sum(axis=2)  # shape = (n_groups, n_classes)
   with np.errstate(invalid='ignore'):
     cm = np.nan_to_num(cm / g_y_counts[..., None], nan=0.0)  # normalize
+    # shape = (n_groups, n_classes, n_classes)
+  # cm[a, y, y'] is Pr[y_pred = y' | group = a, y_true = y]
+  # p[a, y] of second return value is Pr[group = a, y_true = y]
   return (cm, g_y_counts / g_y_counts.sum())
 
 
-def disparity(dists, weights, group_weights, weighted_sum=False, ord=np.inf):
+def disparity(dists, weights, weighted=False, sum=False, ord=np.inf):
+  # dists are Pr[y_pred | A, E], shape = (n_groups, ..., n_classes)
+  # weights are Pr[A, E], shape = (n_groups, ..., )
   n_groups = dists.shape[0]
-  if weighted_sum:
-    dist_all = (np.moveaxis(dists, 0, -1) * group_weights).sum(axis=-1)
+  if weighted:
+    # dist_all are Pr[y_pred | E]
+    # dist_all.shape = (..., n_classes)
+    dist_all = ((dists * weights[..., None]).sum(axis=0) /
+                weights.sum(axis=0)[..., None])
     all_diffs = dists - dist_all
-    diffs = np.nan_to_num(np.linalg.norm(all_diffs, ord=ord, axis=-1), nan=0.0)
-    return (weights * diffs).sum()
+    all_diffs = all_diffs * weights[..., None]
+    # all_diffs.shape = (n_groups, ..., n_classes)
+    all_diffs = all_diffs.reshape(n_groups, -1)
   else:
     # Pairwise differences
     all_diffs = dists[:, None, ...] - dists[None, :, ...]
     all_diffs = all_diffs.reshape(n_groups, n_groups, -1)
-    diffs = np.nan_to_num(np.linalg.norm(all_diffs, ord=ord, axis=-1), nan=0.0)
-    return diffs.max()
+
+  # if ord == np.inf, takes the max over all (y_pred, E)
+  #   for each pair of A, A' when weighted == False,
+  #   or for each A when weighted == True
+  # if ord == 1, takes the sum over all (y_pred, E)
+  diffs = np.nan_to_num(np.linalg.norm(all_diffs, ord=ord, axis=-1), nan=0.0)
+
+  if sum:
+    return diffs.sum()
+  return diffs.max()
 
 
 @bootstrap_std_error
@@ -91,12 +112,13 @@ def sp_disparity(y_preds,
                  groups,
                  n_classes,
                  n_groups,
-                 weighted_sum=False,
+                 weighted=False,
+                 sum=False,
                  ord=np.inf):
   return disparity(
       *output_dists(y_preds, groups, n_classes, n_groups),
-      group_weights=np.bincount(groups, minlength=n_groups) / len(groups),
-      weighted_sum=weighted_sum,
+      weighted=weighted,
+      sum=sum,
       ord=ord,
   )
 
@@ -107,12 +129,13 @@ def eo_disparity(y_true,
                  groups,
                  n_classes,
                  n_groups,
-                 weighted_sum=False,
+                 weighted=False,
+                 sum=False,
                  ord=np.inf):
   return disparity(
       *confusion_matrix(y_true, y_preds, groups, n_classes, n_groups),
-      group_weights=np.bincount(groups, minlength=n_groups) / len(groups),
-      weighted_sum=weighted_sum,
+      weighted=weighted,
+      sum=sum,
       ord=ord,
   )
 
@@ -133,12 +156,13 @@ def tpr_disparity(y_true,
                   groups,
                   n_classes,
                   n_groups,
-                  weighted_sum=False,
+                  weighted=False,
+                  sum=False,
                   ord=np.inf):
   return disparity(
       *tpr_disparity_dists(y_true, y_preds, groups, n_classes, n_groups),
-      group_weights=np.bincount(groups, minlength=n_groups) / len(groups),
-      weighted_sum=weighted_sum,
+      weighted=weighted,
+      sum=sum,
       ord=ord,
   )
 
@@ -154,13 +178,14 @@ def fpr_disparity(y_true,
                   groups,
                   n_classes,
                   n_groups,
-                  weighted_sum=False,
+                  weighted=False,
+                  sum=False,
                   ord=np.inf):
   assert n_classes == 2
   return disparity(
       *fpr_disparity_dists(y_true, y_preds, groups, n_groups),
-      group_weights=np.bincount(groups, minlength=n_groups) / len(groups),
-      weighted_sum=weighted_sum,
+      weighted=weighted,
+      sum=sum,
       ord=ord,
   )
 
@@ -230,9 +255,14 @@ def evaluate(y_true: Optional[np.ndarray] = None,
     metrics['sp_disparity'] = sp_disparity(y_preds, groups, **kwargs)
     metrics['sp_disparity_weighted'] = sp_disparity(y_preds,
                                                     groups,
-                                                    weighted_sum=True,
-                                                    ord=1,
+                                                    weighted=True,
                                                     **kwargs)
+    metrics['sp_disparity_weighted_sum'] = sp_disparity(y_preds,
+                                                        groups,
+                                                        weighted=True,
+                                                        sum=True,
+                                                        ord=1,
+                                                        **kwargs)
     if y_true is not None:
       tpr_metric_name = 'tpr_binary_disparity' if n_classes == 2 else 'tpr_disparity'
       metrics[f'{tpr_metric_name}'] = tpr_disparity(y_true, y_preds, groups,
@@ -240,24 +270,41 @@ def evaluate(y_true: Optional[np.ndarray] = None,
       metrics[f'{tpr_metric_name}_weighted'] = tpr_disparity(y_true,
                                                              y_preds,
                                                              groups,
-                                                             weighted_sum=True,
-                                                             ord=1,
+                                                             weighted=True,
                                                              **kwargs)
+      metrics[f'{tpr_metric_name}_weighted_sum'] = tpr_disparity(y_true,
+                                                                 y_preds,
+                                                                 groups,
+                                                                 weighted=True,
+                                                                 sum=True,
+                                                                 ord=1,
+                                                                 **kwargs)
       if n_classes > 2:
         metrics['tpr_disparity_rms'] = tpr_disparity(
             y_true, y_preds, groups, ord=2, **kwargs) / np.sqrt(n_classes)
       if n_classes == 2:
         metrics['fpr_binary_disparity'] = fpr_disparity(y_true, y_preds, groups,
                                                         **kwargs)
-        metrics['fpr_binary_disparity_weighted'] = fpr_disparity(
-            y_true, y_preds, groups, weighted_sum=True, ord=1, **kwargs)
+        metrics['fpr_binary_disparity_weighted'] = fpr_disparity(y_true,
+                                                                 y_preds,
+                                                                 groups,
+                                                                 weighted=True,
+                                                                 **kwargs)
+        metrics['fpr_binary_disparity_weighted_sum'] = fpr_disparity(
+            y_true, y_preds, groups, weighted=True, sum=True, ord=1, **kwargs)
       metrics['eo_disparity'] = eo_disparity(y_true, y_preds, groups, **kwargs)
       metrics['eo_disparity_weighted'] = eo_disparity(y_true,
                                                       y_preds,
                                                       groups,
-                                                      weighted_sum=True,
-                                                      ord=1,
+                                                      weighted=True,
                                                       **kwargs)
+      metrics['eo_disparity_weighted_sum'] = eo_disparity(y_true,
+                                                          y_preds,
+                                                          groups,
+                                                          weighted=True,
+                                                          sum=True,
+                                                          ord=1,
+                                                          **kwargs)
   return metrics
 
 
@@ -318,7 +365,7 @@ def evaluate_overlapping(y_true,
   # fix weighted disparity metrics
   inflation_ratio = len(y_true_all) / len(y_true)
   for k in metrics_fairness:
-    if k.endswith('_weighted'):
+    if '_weighted' in k:
       metrics_fairness[k] = list(metrics_fairness[k])
       metrics_fairness[k][0] *= inflation_ratio
       # may be greater than 1, because groups are overlapping
@@ -476,6 +523,7 @@ def get_pareto_idx(df_metrics,
                    performance_metric='accuracy',
                    tolerance=0.5,
                    subset=None):
+  subset = np.arange(len(df_metrics)) if subset is None else subset
 
   performance = df_metrics[performance_metric]['mean'].values
   if 'std' in df_metrics[performance_metric]:
@@ -489,11 +537,11 @@ def get_pareto_idx(df_metrics,
     fairness_std = np.zeros_like(fairness)
 
   def is_pareto(i):
+    this_subset = np.setdiff1d(subset, [i])
     a = performance[i] + tolerance * performance_std[i] <= performance
     f = fairness[i] - tolerance * fairness_std[i] >= fairness
-    return not (any((a & f)[:i]) | any((a & f)[i + 1:]))
+    return not any((a & f)[this_subset])
 
-  subset = np.arange(len(df_metrics)) if subset is None else subset
   return np.array([i for i in subset if is_pareto(i)])
 
 
